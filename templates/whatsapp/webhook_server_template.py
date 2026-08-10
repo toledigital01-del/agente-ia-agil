@@ -47,7 +47,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-from agent import handle_message, is_handoff_request
+from agent import handle_message, is_handoff_request, is_frustration_keyword, is_repeated_question
+
+FRUSTRATION_THRESHOLD = 2  # ver seção 39 do SKILL.md
 
 # ── Configuração Meta Cloud API ────────────────────────────────────────────────
 
@@ -282,6 +284,33 @@ def check_human_handoff(phone: str, name: str, text: str) -> bool:
 
     # Toldo NÃO aciona mais handoff humano (removido 2026-08-10) -- tem preço
     # médio de referência no system_prompt e a IA responde direto.
+
+    # Cliente travado/frustrado (added 2026-08-10, ver seção 39 do SKILL.md
+    # -- mesma lógica de watcher.py, mantida em sincronia aqui).
+    historico = sessions.get_lead_history(lead_id, limit=8)
+    mensagens_anteriores = [h["content"] for h in historico if h["role"] == "user"]
+    sinal_repeticao = is_repeated_question(text, mensagens_anteriores)
+    sinal_palavra = is_frustration_keyword(text)
+
+    if sinal_repeticao or sinal_palavra:
+        contador = int(sessions.get_metadata(lead_id, "frustration_signal_count", "0") or "0") + 1
+        sessions.save_metadata(lead_id, "frustration_signal_count", str(contador))
+        if contador >= FRUSTRATION_THRESHOLD:
+            sessions.save_metadata(lead_id, "human_handoff", "1")
+            sessions.save_metadata(lead_id, "human_handoff_at", str(int(time.time())))
+            sessions.save_metadata(lead_id, "frustration_signal_count", "0")
+            send_whatsapp(
+                phone,
+                "Percebi que talvez eu não tenha esclarecido direito sua dúvida — vou chamar um de nossos "
+                "consultores pra te ajudar com mais atenção, só um instante! 🙋"
+            )
+            if OWNER_PHONE:
+                ultimas = "\n".join(f"- {m}" for m in mensagens_anteriores[:3]) or "(sem histórico anterior)"
+                send_whatsapp(OWNER_PHONE,
+                    f"🧐 {name} ({phone}) parece travado(a)/frustrado(a) na conversa.\n"
+                    f"Mensagem atual: \"{text}\"\nMensagens recentes dele:\n{ultimas}\n\n"
+                    "A IA foi pausada — considere assumir manualmente.")
+            return True
 
     return False
 

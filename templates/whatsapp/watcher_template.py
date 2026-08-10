@@ -51,7 +51,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 sys.path.insert(0, str(Path(__file__).parent))
-from agent import handle_message, is_trigger, is_handoff_request
+from agent import handle_message, is_trigger, is_handoff_request, is_frustration_keyword, is_repeated_question
 
 # ── Configuração (preenchida pelo setup) ──────────────────────────────────────
 EVOLUTION_URL = client_config.get("evolution_url", "http://localhost:8080")
@@ -75,6 +75,13 @@ HEALTH_RESTART_COOLDOWN = 600 # segundos mínimos entre dois restarts automátic
 # 4 dias de áudio quebrado só percebidos porque o cliente reparou na mão.
 ELEVEN_FAIL_ALERT_THRESHOLD = 3     # falhas seguidas antes de avisar o dono
 ELEVEN_ALERT_COOLDOWN = 3600        # segundos mínimos entre dois alertas (1h)
+
+# Cliente travado/frustrado: repetiu a mesma dúvida ou usou linguagem de
+# frustração, sem pedir atendente explicitamente -- sem isso virava venda
+# perdida silenciosa (ninguém percebia). 2 sinais (não 1) antes de escalar,
+# pra não pausar a IA por causa de uma mensagem isolada/brincadeira. Ver
+# seção 39 do SKILL.md.
+FRUSTRATION_THRESHOLD = 2
 
 STATE_FILE = client_config.STATE_FILE
 STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -1037,6 +1044,57 @@ def check_human_handoff(phone: str, name: str, text: str) -> bool:
     # própria IA responde direto, igual qualquer outro produto. is_toldo_request
     # continua existindo em agent_core_template.py caso algum dia se queira
     # reativar um tratamento especial, mas não é mais chamado daqui.
+
+    # Cliente travado/frustrado (added 2026-08-10): repetiu a mesma
+    # dúvida/pergunta (is_repeated_question, também pega hesitação repetida
+    # tipo "não sei" várias vezes seguidas -- é auto-similar por definição)
+    # ou usou linguagem explícita de frustração (is_frustration_keyword),
+    # sem pedir atendente. Um sinal isolado NÃO escala sozinho (pode ser
+    # brincadeira/coincidência) -- só pausa a IA ao acumular
+    # FRUSTRATION_THRESHOLD sinais. O contador reseta sozinho quando o lead
+    # avança de verdade (handle_message() em agent_template.py zera ao
+    # salvar width/height/cor/endereco novos). Ver seção 39 do SKILL.md.
+    historico = sessions.get_lead_history(lead_id, limit=8)
+    mensagens_anteriores = [h["content"] for h in historico if h["role"] == "user"]
+
+    sinal_repeticao = is_repeated_question(text, mensagens_anteriores)
+    sinal_palavra = is_frustration_keyword(text)
+
+    if sinal_repeticao or sinal_palavra:
+        contador = int(sessions.get_metadata(lead_id, "frustration_signal_count", "0") or "0") + 1
+        sessions.save_metadata(lead_id, "frustration_signal_count", str(contador))
+
+        motivos = []
+        if sinal_repeticao:
+            motivos.append("repetiu uma dúvida/pergunta já feita antes")
+        if sinal_palavra:
+            motivos.append("usou linguagem de frustração/confusão")
+        motivo_str = " e ".join(motivos)
+
+        if contador >= FRUSTRATION_THRESHOLD:
+            sessions.save_metadata(lead_id, "human_handoff", "1")
+            sessions.save_metadata(lead_id, "human_handoff_at", str(int(time.time())))
+            sessions.save_metadata(lead_id, "frustration_signal_count", "0")
+            logger.info(f"🧐 {name} ({phone}) parece travado/frustrado ({motivo_str}, {contador} sinais). Pausando IA e notificando o responsável.")
+            send_whatsapp(
+                phone,
+                "Percebi que talvez eu não tenha esclarecido direito sua dúvida — vou chamar um de nossos "
+                "consultores pra te ajudar com mais atenção, só um instante! 🙋"
+            )
+            if OWNER_PHONE:
+                ultimas = "\n".join(f"- {m}" for m in mensagens_anteriores[:3]) or "(sem histórico anterior)"
+                send_whatsapp(
+                    OWNER_PHONE,
+                    f"🧐 {name} ({phone}) parece travado(a)/frustrado(a) na conversa ({motivo_str}).\n"
+                    f"Mensagem atual: \"{text}\"\nMensagens recentes dele:\n{ultimas}\n\n"
+                    "A IA foi pausada para esse lead — considere assumir manualmente."
+                )
+            return True
+        else:
+            logger.info(
+                f"🧐 Sinal de frustração pra {name} ({phone}) ({motivo_str}) -- "
+                f"{contador}/{FRUSTRATION_THRESHOLD}, ainda não escala."
+            )
 
     return False
 

@@ -24,7 +24,7 @@ from datetime import datetime
 
 # Carregar templates compartilhados
 sys.path.insert(0, str(Path(__file__).parent.parent / "shared"))
-from agent_core_template import call_ai, is_purchase_intent, is_handoff_request, format_checkout_message, SYSTEM_PROMPT, SESSION_TTL
+from agent_core_template import call_ai, is_purchase_intent, is_handoff_request, is_frustration_keyword, is_repeated_question, format_checkout_message, SYSTEM_PROMPT, SESSION_TTL
 import client_config
 from sessions_template import init_db, load_session, save_session, create_lead, add_message, mark_checkout_sent, save_metadata, get_metadata, get_lead_history
 
@@ -478,6 +478,15 @@ def handle_message(phone: str, sender_name: str, text: str) -> tuple:
     endereco = extract_address(text)
     if endereco:
         save_metadata(lead_id, "endereco", endereco)
+
+    # Qualquer um desses dados novos é progresso real na conversa -- zera o
+    # contador de "cliente travado/frustrado" (watcher.py,
+    # check_human_handoff()). Sem isso, um sinal antigo já resolvido (ex:
+    # confusão lá no início, contornada com sucesso) continuaria contando
+    # pra sempre até um sinal novo bem mais tarde, mesmo sem relação
+    # nenhuma com o anterior. Ver seção 39 do SKILL.md.
+    if dims or cep or cor or endereco:
+        save_metadata(lead_id, "frustration_signal_count", "0")
 
     # 3. Carregar sessão ativa (cache "quente", expira em SESSION_TTL) ou,
     # se ela já expirou, reconstruir o contexto a partir do histórico

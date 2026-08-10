@@ -8,7 +8,9 @@ Use este template como base para criar:
 Substitua {{placeholders}} com dados do usuário durante setup.
 """
 
+import difflib
 import json
+import re
 import urllib.request
 import urllib.error
 
@@ -224,6 +226,79 @@ def is_toldo_request(message: str) -> bool:
 
     message_lower = message.lower()
     return "toldo" in message_lower
+
+
+# ── Detecção de cliente travado/frustrado (added 2026-08-10) ────────────────
+# Até aqui só escalava pra humano em pedido EXPLÍCITO ("falar com atendente").
+# Um cliente repetindo a mesma dúvida, ou hesitando várias vezes sem sair do
+# lugar, virava venda perdida silenciosa -- a IA continuava tentando do
+# mesmo jeito, sem ninguém perceber que aquele lead precisava de ajuda
+# humana. Dois sinais independentes, cada um soma no mesmo contador
+# (frustration_signal_count em check_human_handoff/watcher.py) -- só escala
+# depois de FRUSTRATION_THRESHOLD sinais, pra não pausar a IA por causa de
+# uma mensagem isolada/brincadeira.
+
+FRUSTRATION_KEYWORDS = [
+    "não entendi", "nao entendi", "não entendo", "nao entendo",
+    "já disse", "ja disse", "já falei", "ja falei", "já te falei", "ja te falei",
+    "não é isso", "nao e isso", "não é isso que eu", "nao e isso que eu",
+    "não foi isso", "nao foi isso", "não é o que eu perguntei", "nao e o que eu perguntei",
+    "de novo?", "outra vez?", "pela segunda vez", "pela terceira vez",
+    "confuso", "confusa", "muito confuso", "muito confusa", "complicado demais",
+    "não ajuda", "nao ajuda", "isso não resolve", "isso nao resolve",
+    "não estou entendendo", "nao estou entendendo",
+    "cansei disso", "cansado disso", "cansada disso", "que saco", "que chato",
+    "isso é um robô", "isso e um robo", "só fala isso", "so fala isso",
+    "resposta automática", "resposta automatica", "não responde minha pergunta",
+    "nao responde minha pergunta", "tá difícil", "ta dificil", "muito difícil isso",
+]
+
+
+def is_frustration_keyword(message: str) -> bool:
+    """Detecta linguagem explícita de frustração/confusão do cliente (ex:
+    "não entendi", "já falei isso"). Conta como 1 sinal pro contador de
+    frustração -- não escala sozinho, precisa somar com outro sinal."""
+    if not message:
+        return False
+    message_lower = message.lower()
+
+    if any(kw in message_lower for kw in FRUSTRATION_KEYWORDS):
+        return True
+
+    # "???"/"??" -- confusão/impaciência (mas não conta "?" único, que é
+    # pergunta normal) e mensagem toda em maiúsculas (tipo "gritando") só
+    # quando tem tamanho real, pra não pegar sigla curta tipo "CEP" ou "OK".
+    if "??" in message_lower:
+        return True
+    letras = re.sub(r"[^a-zA-ZÀ-ÿ]", "", message)
+    if len(letras) >= 15 and letras.isupper():
+        return True
+
+    return False
+
+
+def is_repeated_question(message: str, previous_user_messages: list) -> bool:
+    """Detecta se a mensagem atual é muito parecida com alguma das últimas
+    mensagens do próprio cliente -- pega tanto "perguntou a mesma coisa de
+    novo" quanto "hesitou várias vezes" (ex: "não sei" repetido é, por
+    definição, muito similar a si mesmo). Ignora mensagens curtas (menos de
+    8 caracteres) pra não disparar em respostas genéricas tipo "oi"/"sim"/"ok",
+    que são naturalmente parecidas entre si sem indicar nada de errado."""
+    if not message or len(message.strip()) < 8:
+        return False
+    if not previous_user_messages:
+        return False
+
+    atual = re.sub(r"\s+", " ", message.strip().lower())
+
+    for anterior in previous_user_messages:
+        if not anterior or len(anterior.strip()) < 8:
+            continue
+        comparar = re.sub(r"\s+", " ", anterior.strip().lower())
+        if difflib.SequenceMatcher(None, atual, comparar).ratio() >= 0.6:
+            return True
+
+    return False
 
 
 def format_checkout_message(url: str = CHECKOUT_LINK) -> str:
