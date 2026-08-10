@@ -214,6 +214,13 @@ Isso também prova que **a alegação de "área mínima cobrada 1,8 m²"** (docu
 
 **Log em produção (`/opt/clientes/<cliente>/watcher.log` na VPS):** não sai pelo `journalctl` do systemd (só mostra start/stop do serviço) — o `StandardOutput`/`StandardError` do unit file redireciona pra esse arquivo direto. Sempre olhar esse arquivo primeiro pra depurar, não o journalctl.
 
+### 37. Tag `[TEXTO_APENAS]` — resumo final de configuração sempre por escrito (added 2026-08-10)
+Pedido do cliente: o resumo de configuração (Etapa 5 do prompt: produto + cor + medidas + instalação + bandô + acionamento + lado do comando) e a confirmação de endereço (Etapa 6.5) são checklists — mais fácil o lead conferir item por item lendo do que ouvindo tudo de uma vez em áudio, mesmo se ele tiver mandado áudio até ali.
+- `handle_message()` agora retorna uma **tupla de 3** (`resposta, media_requests, forcar_texto`) em vez de 2 — todo call site precisa desempacotar os 3 (watcher, webhook_server, CLI `--chat` do agent.py).
+- A IA escreve a tag `[TEXTO_APENAS]` no início da mensagem (instruído nos dois pontos do prompt acima); `extract_force_text_flag()` em `agent_template.py` detecta e remove a tag do texto salvo/visível, devolvendo a flag. `watcher.py`/`webhook_server.py` usam `is_audio and not forcar_texto` na hora de decidir áudio vs texto — ou seja, a tag sempre vence, mesmo se a mensagem recebida do cliente foi um áudio.
+- **Mesma leva:** reforçada a proteção de nunca falar link em voz alta — `URL_PATTERN` agora pega `www.algo` mesmo sem `http(s)://` na frente (cliente relatou a IA falando "www ponto asaas" em áudio), e `preprocess_text_for_tts()` passou a usar esse MESMO `URL_PATTERN` (em vez de uma regex própria) pra nunca mais divergir uma da outra — essa era exatamente a classe de bug (duas regras parecidas, uma esquecida) que já causou retrabalho nesta sessão.
+- Testado via `tests/test_tts_preprocessing.py` (25/25, incluindo `extract_force_text_flag` e o link sem protocolo) antes do deploy — nenhum teste de áudio real precisou ser gerado aqui, já que é lógica de roteamento (texto vs áudio), não geração de fala.
+
 **Correção manual de emergência** (destravar um lead específico sem esperar o timeout nem lembrar o comando): SSH na VPS e rodar
 ```
 cd /opt/agente && AGENTE_CLIENTE=agil-persianas AGENTE_CLIENTES_DIR=/opt/clientes python3 -c "
