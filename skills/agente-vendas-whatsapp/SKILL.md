@@ -221,6 +221,16 @@ Pedido do cliente: o resumo de configuração (Etapa 5 do prompt: produto + cor 
 - **Mesma leva:** reforçada a proteção de nunca falar link em voz alta — `URL_PATTERN` agora pega `www.algo` mesmo sem `http(s)://` na frente (cliente relatou a IA falando "www ponto asaas" em áudio), e `preprocess_text_for_tts()` passou a usar esse MESMO `URL_PATTERN` (em vez de uma regex própria) pra nunca mais divergir uma da outra — essa era exatamente a classe de bug (duas regras parecidas, uma esquecida) que já causou retrabalho nesta sessão.
 - Testado via `tests/test_tts_preprocessing.py` (25/25, incluindo `extract_force_text_flag` e o link sem protocolo) antes do deploy — nenhum teste de áudio real precisou ser gerado aqui, já que é lógica de roteamento (texto vs áudio), não geração de fala.
 
+### 38. Reengajamento de lead que esfria ANTES do checkout (added 2026-08-10)
+`process_payment_followups()` (seção 5) só cobre quem **já tem** link de checkout gerado e não pagou — mas na prática a maior parte da desistência num fluxo de várias perguntas (BANT completo, várias etapas) acontece **antes** disso: o lead dá a medida, some, e nunca mais recebia nenhum contato automático. Pedido do cliente depois de eu apontar isso como a melhoria de maior impacto em conversão.
+- **`get_leads_sem_checkout()`** (nova, em `sessions_template.py`): retorna todo lead com `sent_checkout = 0` junto com o timestamp da mensagem mais recente (`MAX(messages.ts)`).
+- **`process_midfunnel_followups()`** (novo, em `watcher.py`, chamado no mesmo bloco de manutenção periódica de `process_payment_followups()`, ~10 min): mesmo padrão anti-bloqueio (1 envio por ciclo). Só reengaja quem tem `width`+`height` salvos (sinal real de interesse — sem isso, alguém que só mandou "oi" e sumiu não recebe nada, evita parecer spam/perseguição). Dois toques, guardados em `midfunnel_followup_status` (`"0"`→`"1"`→`"2"`, mesmo padrão de `followup_status`):
+  - **4h de silêncio:** mensagem citando a medida específica salva (ex: "sua persiana de 1,20m x 1,50m"), tom de "ficou alguma dúvida?".
+  - **48h de silêncio:** segunda mensagem, mais leve, sem pressão, "se quiser retomar é só chamar".
+- **Reset ao responder:** `handle_message()` zera `midfunnel_followup_status` pra `"0"` toda vez que o lead manda qualquer mensagem nova — sem isso, um lead que respondesse uma vez depois do primeiro toque e sumisse de novo não teria mais nenhum reengajamento na rodada seguinte de silêncio (o status já teria avançado).
+- **Validado antes do deploy** com SQLite in-memory simulando 6 cenários (com/sem medida salva, já tem checkout, handoff humano ativo, e os dois estágios de silêncio) — todos bateram com o esperado.
+- **Confirmado ao vivo no primeiro ciclo depois do deploy**: disparou pro lead real Fernando (555199980089, 4h de silêncio, medida 1,5m x 1,5m salva) — `📤 Enviado para 555199980089` no log e `midfunnel_followup_status` virou `"1"` no banco, exatamente como esperado.
+
 **Correção manual de emergência** (destravar um lead específico sem esperar o timeout nem lembrar o comando): SSH na VPS e rodar
 ```
 cd /opt/agente && AGENTE_CLIENTE=agil-persianas AGENTE_CLIENTES_DIR=/opt/clientes python3 -c "
