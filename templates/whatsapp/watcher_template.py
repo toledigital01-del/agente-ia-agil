@@ -673,6 +673,18 @@ def send_whatsapp_audio_elevenlabs(phone: str, message: str) -> bool:
         finally:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
+    except urllib.error.HTTPError as e:
+        # Corpo da resposta tem o motivo real (ex: chave inválida/revogada) --
+        # sem isso o log só mostra "HTTP Error 400: Bad Request" e um erro de
+        # autenticação parece indistinguível de um bug de texto/pronúncia.
+        # Ver seção 35 do SKILL.md: 4 dias de áudio quebrado por chave errada,
+        # diagnosticado tarde por falta desse detalhe no log.
+        try:
+            corpo = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            corpo = "(sem corpo)"
+        logger.error(f"Erro ao gerar/enviar áudio ElevenLabs para {phone}: HTTP {e.code} — {corpo}")
+        return False
     except Exception as e:
         logger.error(f"Erro ao gerar/enviar áudio ElevenLabs para {phone}: {e}")
         return False
