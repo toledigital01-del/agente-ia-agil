@@ -233,6 +233,32 @@ def get_leads_with_checkout() -> list:
     return [{"id": r["id"], "phone": r["phone"], "name": r["name"]} for r in rows]
 
 
+def get_leads_sem_checkout() -> list:
+    """Retorna leads que NUNCA chegaram a receber um link de checkout, junto
+    com o timestamp da última mensagem de cada um -- usado pra reengajar quem
+    esfriou no meio do funil (deu medida, cor etc. e sumiu antes do
+    orçamento), diferente de get_leads_with_checkout() que é sobre cobrança
+    de quem já tem link mas não pagou."""
+    conn = _db()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT leads.id AS id, leads.phone AS phone, leads.name AS name,
+               MAX(messages.ts) AS last_ts
+        FROM leads
+        JOIN messages ON messages.lead_id = leads.id
+        WHERE leads.sent_checkout = 0
+        GROUP BY leads.id
+        """
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [
+        {"id": r["id"], "phone": r["phone"], "name": r["name"], "last_ts": r["last_ts"]}
+        for r in rows
+    ]
+
+
 def get_stats():
     """Retorna estatísticas do CRM."""
     conn = _db()

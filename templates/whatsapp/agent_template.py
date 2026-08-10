@@ -452,6 +452,14 @@ def handle_message(phone: str, sender_name: str, text: str) -> tuple:
     # 2. Criar/carregar lead
     lead_id = create_lead(phone, name=sender_name)
 
+    # Lead voltou a responder -- zera o contador de "esfriou no meio do
+    # funil" (watcher.py, process_midfunnel_followups()). Sem isso, um lead
+    # que respondesse UMA vez depois do primeiro toque e sumisse de novo
+    # nunca mais receberia um segundo ciclo de reengajamento (o status já
+    # teria avançado além de "0"/"1" da rodada anterior). Ver seção 38 do
+    # SKILL.md.
+    save_metadata(lead_id, "midfunnel_followup_status", "0")
+
     # Tentar extrair dimensões e CEP da mensagem atual
     dims = extract_dimensions(text)
     if dims:

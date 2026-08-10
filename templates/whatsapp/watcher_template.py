@@ -1154,6 +1154,86 @@ def process_payment_followups():
         logger.error(f"Erro no processamento de followups de cobrança: {e}\n{traceback.format_exc()}")
 
 
+# Limites de silêncio pro lead que esfriou ANTES de chegar no checkout (não
+# confundir com HEALTH_* / ELEVEN_* acima, que são de conexão/áudio, nem com
+# os prazos de process_payment_followups, que são pra quem JÁ tem link mas
+# não pagou). Prazos diferentes de propósito -- aqui ainda não houve
+# compromisso nenhum do lead, só interesse demonstrado, então dá mais tempo
+# antes do primeiro toque e um segundo toque bem mais espaçado (não é
+# cobrança, é reengajamento, tom mais leve).
+MIDFUNNEL_FIRST_NUDGE_SECONDS = 4 * 3600    # 4 horas
+MIDFUNNEL_SECOND_NUDGE_SECONDS = 48 * 3600  # 48 horas
+
+
+def process_midfunnel_followups():
+    """Reengaja leads que deram medida (sinal real de interesse) mas
+    sumiram ANTES de chegar no link de checkout -- o followup de cobrança
+    (process_payment_followups) só cobre quem já tem link gerado; a maior
+    parte da desistência normalmente acontece antes disso, no meio do
+    funil, e até agora não tinha nenhum reengajamento automático pra esse
+    caso (pedido do cliente, 2026-08-10 -- ver seção 38 do SKILL.md).
+
+    Mesmo padrão anti-bloqueio de process_payment_followups: no máximo 1
+    envio por chamada."""
+    try:
+        import sessions
+
+        leads_rows = sessions.get_leads_sem_checkout()
+        now_ts = int(time.time())
+
+        for lead in leads_rows:
+            lead_id = lead["id"]
+            phone = lead["phone"]
+            name = lead["name"] or "tudo bem"
+            last_ts = lead["last_ts"]
+
+            if not last_ts:
+                continue
+
+            # Só vale a pena reengajar quem deu um sinal real de interesse
+            # (chegou a passar as medidas) -- evita mandar mensagem
+            # automática pra alguém que só disse "oi" e sumiu, o que
+            # incomoda mais do que ajuda.
+            largura = sessions.get_metadata(lead_id, "width")
+            altura = sessions.get_metadata(lead_id, "height")
+            if not largura or not altura:
+                continue
+
+            if sessions.get_metadata(lead_id, "human_handoff", "0") == "1":
+                continue
+
+            status = sessions.get_metadata(lead_id, "midfunnel_followup_status", "0")
+            if status == "2":
+                continue  # já mandou os 2 toques dessa rodada de silêncio
+
+            elapsed = now_ts - int(last_ts)
+
+            if elapsed >= MIDFUNNEL_FIRST_NUDGE_SECONDS and status == "0":
+                logger.info(f"💤 Reengajando lead esfriado (4h, sem checkout) {name} ({phone})")
+                msg = (
+                    f"Oi, {name}! Vi que a gente tava conversando sobre a sua persiana "
+                    f"de {largura}m x {altura}m e ficou por aqui. Ficou alguma dúvida ou "
+                    f"posso te ajudar a fechar o orçamento? 😊"
+                )
+                if send_whatsapp(phone, msg):
+                    sessions.save_metadata(lead_id, "midfunnel_followup_status", "1")
+                    return  # anti-bloqueio: só 1 envio por ciclo
+
+            elif elapsed >= MIDFUNNEL_SECOND_NUDGE_SECONDS and status == "1":
+                logger.info(f"💤 Reengajando lead esfriado (48h, sem checkout) {name} ({phone})")
+                msg = (
+                    f"Oi, {name}! Só passando pra saber se ainda faz sentido pra você — "
+                    "se precisar de mais alguma informação ou quiser retomar o orçamento "
+                    "da sua persiana, é só me chamar por aqui, tá bom? 🙂"
+                )
+                if send_whatsapp(phone, msg):
+                    sessions.save_metadata(lead_id, "midfunnel_followup_status", "2")
+                    return  # anti-bloqueio: só 1 envio por ciclo
+
+    except Exception as e:
+        logger.error(f"Erro no processamento de followups de meio de funil: {e}\n{traceback.format_exc()}")
+
+
 # ── Transcrição de Áudio (Whisper) ───────────────────────────────────────────
 
 def transcribe_audio_base64(base64_str: str) -> str:
@@ -1277,6 +1357,7 @@ def watch():
             # Manutenção periódica a cada 200 iterações (~10 minutos)
             if iteration_counter % 200 == 0:
                 process_payment_followups()
+                process_midfunnel_followups()
                 import sessions as _sessions
                 _sessions.cleanup_expired_sessions()
 
