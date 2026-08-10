@@ -47,7 +47,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-from agent import handle_message, is_handoff_request, is_toldo_request
+from agent import handle_message, is_handoff_request
 
 # ── Configuração Meta Cloud API ────────────────────────────────────────────────
 
@@ -280,15 +280,8 @@ def check_human_handoff(phone: str, name: str, text: str) -> bool:
                 f"Mensagem: \"{text}\"\n\nA IA foi pausada.")
         return True
 
-    if is_toldo_request(text):
-        sessions.save_metadata(lead_id, "human_handoff", "1")
-        sessions.save_metadata(lead_id, "human_handoff_at", str(int(time.time())))
-        send_whatsapp(phone, "Toldo é orçado sob consulta! Já conecto você com um atendente. 🙋")
-        if OWNER_PHONE:
-            send_whatsapp(OWNER_PHONE,
-                f"🏕️ {name} ({phone}) perguntou sobre TOLDO.\n"
-                f"Mensagem: \"{text}\"\n\nA IA foi pausada.")
-        return True
+    # Toldo NÃO aciona mais handoff humano (removido 2026-08-10) -- tem preço
+    # médio de referência no system_prompt e a IA responde direto.
 
     return False
 

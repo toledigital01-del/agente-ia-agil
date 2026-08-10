@@ -51,7 +51,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 sys.path.insert(0, str(Path(__file__).parent))
-from agent import handle_message, is_trigger, is_handoff_request, is_toldo_request
+from agent import handle_message, is_trigger, is_handoff_request
 
 # ── Configuração (preenchida pelo setup) ──────────────────────────────────────
 EVOLUTION_URL = client_config.get("evolution_url", "http://localhost:8080")
@@ -1031,17 +1031,12 @@ def check_human_handoff(phone: str, name: str, text: str) -> bool:
             )
         return True
 
-    if is_toldo_request(text):
-        sessions.save_metadata(lead_id, "human_handoff", "1")
-        sessions.save_metadata(lead_id, "human_handoff_at", str(int(time.time())))
-        logger.info(f"🏕️ {name} ({phone}) perguntou sobre Toldo (sem preço automático). Pausando IA e notificando o responsável.")
-        send_whatsapp(phone, "Toldo é orçado sob consulta com o nosso setor especializado! Já vou te conectar com um atendente pra fechar os detalhes certinho. 🙋")
-        if OWNER_PHONE:
-            send_whatsapp(
-                OWNER_PHONE,
-                f"🏕️ {name} ({phone}) perguntou sobre TOLDO (esse item não tem preço calculado automaticamente).\nMensagem do cliente: \"{text}\"\n\nA IA foi pausada para esse lead — responda direto por aqui no WhatsApp com o orçamento de toldo."
-            )
-        return True
+    # Toldo NÃO aciona mais handoff humano (removido 2026-08-10, pedido do
+    # cliente) -- agora tem preço médio de referência no system_prompt
+    # (seção 24 do SKILL.md, "a partir de R$300/m², mínimo R$450/peça") e a
+    # própria IA responde direto, igual qualquer outro produto. is_toldo_request
+    # continua existindo em agent_core_template.py caso algum dia se queira
+    # reativar um tratamento especial, mas não é mais chamado daqui.
 
     return False
 

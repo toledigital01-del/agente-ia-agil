@@ -24,7 +24,7 @@ from datetime import datetime
 
 # Carregar templates compartilhados
 sys.path.insert(0, str(Path(__file__).parent.parent / "shared"))
-from agent_core_template import call_ai, is_purchase_intent, is_handoff_request, is_toldo_request, format_checkout_message, SYSTEM_PROMPT, SESSION_TTL
+from agent_core_template import call_ai, is_purchase_intent, is_handoff_request, format_checkout_message, SYSTEM_PROMPT, SESSION_TTL
 import client_config
 from sessions_template import init_db, load_session, save_session, create_lead, add_message, mark_checkout_sent, save_metadata, get_metadata, get_lead_history
 
