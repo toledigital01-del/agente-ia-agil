@@ -499,7 +499,7 @@ def preprocess_text_for_tts(text: str) -> str:
         int_part = int(match.group(1))
         dec_part = int(match.group(2))
         base = f"{number_to_words(int_part)} metro"
-        if int_part != 1 or dec_part > 0:
+        if int_part != 1:
             base += "s"
         if dec_part > 0:
             base += f" e {number_to_words(dec_part)} centímetros"
