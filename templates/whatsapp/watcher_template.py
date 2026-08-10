@@ -1201,9 +1201,9 @@ def process_midfunnel_followups():
             if status == "2":
                 continue  # já mandou os 2 toques dessa rodada de silêncio
 
-            elapsed = now_ts - int(last_ts)
+            elapsed_desde_ultima_msg = now_ts - int(last_ts)
 
-            if elapsed >= MIDFUNNEL_FIRST_NUDGE_SECONDS and status == "0":
+            if elapsed_desde_ultima_msg >= MIDFUNNEL_FIRST_NUDGE_SECONDS and status == "0":
                 logger.info(f"💤 Reengajando lead esfriado (4h, sem checkout) {name} ({phone})")
                 msg = (
                     f"Oi, {name}! Vi que a gente tava conversando sobre a sua persiana "
@@ -1212,10 +1212,31 @@ def process_midfunnel_followups():
                 )
                 if send_whatsapp(phone, msg):
                     sessions.save_metadata(lead_id, "midfunnel_followup_status", "1")
+                    sessions.save_metadata(lead_id, "midfunnel_followup_at", str(now_ts))
                     return  # anti-bloqueio: só 1 envio por ciclo
 
-            elif elapsed >= MIDFUNNEL_SECOND_NUDGE_SECONDS and status == "1":
-                logger.info(f"💤 Reengajando lead esfriado (48h, sem checkout) {name} ({phone})")
+            elif status == "1":
+                # ⚠️ O 2º toque tem que ser medido a partir de QUANDO O 1º
+                # TOQUE FOI ENVIADO (midfunnel_followup_at), NUNCA a partir de
+                # last_ts de novo -- last_ts é a última mensagem do CLIENTE,
+                # que não muda enquanto ele ficar em silêncio. Bug real
+                # encontrado em produção (2026-08-10): usar last_ts aqui fazia
+                # os dois toques dispararem minutos um do outro sempre que o
+                # silêncio original já era bem maior que 48h quando o 1º toque
+                # saiu (ex: lead que sumiu há 5 dias) -- um lead real chegou a
+                # receber os dois avisos com 4 minutos de diferença. Ver seção
+                # 38 do SKILL.md.
+                enviado_em_str = sessions.get_metadata(lead_id, "midfunnel_followup_at")
+                if not enviado_em_str:
+                    # Estado antigo/inconsistente (status "1" sem o timestamp
+                    # novo) -- usa agora como base em vez de arriscar disparar
+                    # de novo na hora.
+                    sessions.save_metadata(lead_id, "midfunnel_followup_at", str(now_ts))
+                    continue
+                elapsed_desde_1_toque = now_ts - int(enviado_em_str)
+                if elapsed_desde_1_toque < MIDFUNNEL_SECOND_NUDGE_SECONDS:
+                    continue
+                logger.info(f"💤 Reengajando lead esfriado (48h após o 1º toque, sem checkout) {name} ({phone})")
                 msg = (
                     f"Oi, {name}! Só passando pra saber se ainda faz sentido pra você — "
                     "se precisar de mais alguma informação ou quiser retomar o orçamento "
