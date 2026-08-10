@@ -120,7 +120,7 @@ When a lead asks for a human, the agent steps aside instead of talking over the 
   python3 -c "import sessions; sessions.save_metadata('whatsapp_<PHONE>', 'human_handoff', '0')"
   ```
   Lead IDs follow the pattern `whatsapp_<phone>`. Expect confusion reports like "the bot stopped answering me" that are actually this feature working — check `human_handoff` before debugging anything else.
-- `OWNER_PHONE` comes from `config.json`'s `owner_phone`. Currently set to `555596611311`, which is *also* the client's own test/lead number, so handoff alerts and customer replies land in the same chat during testing.
+- `OWNER_PHONE` comes from `config.json`'s `owner_phone`. **Updated 2026-08-10** (was `555596611311`, the client's own test/lead number — handoff alerts and customer test replies were landing in the same chat, confusing during testing) to `555399709661` (DDD 53, 8 dígitos locais — um a menos que o padrão de celular BR de 9, mas confirmado funcionando: `send_whatsapp()` retornou sucesso e o cliente confirmou o recebimento de um teste real). Update via SFTP direto no `config.json` (não precisa redeploy de código, só restart do serviço pra recarregar o config).
 
 ### 10. ⚠️ The "Zombie Connection" — #1 cause of "the agent stopped replying"
 **`GET /instance/connectionState` LIES.** It reports the state persisted in Postgres, not the health of the live Baileys websocket. The socket can die while the endpoint keeps answering `{"state":"open"}` indefinitely. On 2026-07-28 the agent was mute for **8 hours** in exactly this state — systemd `active`, process burning normal CPU (polling fine), connectionState `open`, and **zero errors in `watcher.log`**, because from the watcher's point of view it was simply receiving no new messages.
