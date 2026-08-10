@@ -68,6 +68,14 @@ HEALTH_CHECK_EVERY = 100      # iterações (~5 min com POLL_INTERVAL=3)
 HEALTH_FAIL_THRESHOLD = 2     # falhas seguidas antes de reiniciar a instância
 HEALTH_RESTART_COOLDOWN = 600 # segundos mínimos entre dois restarts automáticos
 
+# Alerta de áudio ElevenLabs quebrado: sem isso, uma falha sistêmica (chave
+# inválida/revogada, créditos esgotados) passa despercebida por dias, porque
+# o agente sempre cai pro fallback de texto sem erro visível pro cliente final
+# — foi exatamente o que aconteceu em 2026-08-06/10 (seção 35 do SKILL.md),
+# 4 dias de áudio quebrado só percebidos porque o cliente reparou na mão.
+ELEVEN_FAIL_ALERT_THRESHOLD = 3     # falhas seguidas antes de avisar o dono
+ELEVEN_ALERT_COOLDOWN = 3600        # segundos mínimos entre dois alertas (1h)
+
 STATE_FILE = client_config.STATE_FILE
 STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
 
@@ -557,6 +565,44 @@ def add_tone_tags_for_v3(text: str) -> str:
     return " ".join(f"{tags[i % len(tags)]} {part}" for i, part in enumerate(parts))
 
 
+_eleven_consecutive_failures = 0
+_eleven_last_alert_at = 0
+
+
+def _registrar_falha_audio(motivo: str):
+    """Conta falhas consecutivas de áudio ElevenLabs e avisa o dono (no máximo
+    1x por hora) quando cruza ELEVEN_FAIL_ALERT_THRESHOLD -- ver seção 35/36
+    do SKILL.md. Sem isso, um problema de chave/crédito só é percebido quando
+    o cliente reclama, potencialmente dias depois."""
+    global _eleven_consecutive_failures, _eleven_last_alert_at
+    _eleven_consecutive_failures += 1
+    if _eleven_consecutive_failures < ELEVEN_FAIL_ALERT_THRESHOLD:
+        return
+    agora = int(time.time())
+    if agora - _eleven_last_alert_at < ELEVEN_ALERT_COOLDOWN:
+        return
+    _eleven_last_alert_at = agora
+    if OWNER_PHONE:
+        send_whatsapp(
+            OWNER_PHONE,
+            f"🚨 O agente não está conseguindo gerar áudio há {_eleven_consecutive_failures} tentativas "
+            f"seguidas (ElevenLabs). Motivo mais recente: {motivo}\n\n"
+            "Provável causa: chave de API inválida/expirada ou créditos esgotados. "
+            "Verifique em elevenlabs.io → Settings → API Keys. As respostas continuam chegando por "
+            "texto normalmente enquanto isso não for resolvido."
+        )
+        logger.error(f"🚨 Alerta de áudio quebrado enviado ao dono ({_eleven_consecutive_failures} falhas seguidas).")
+
+
+def _registrar_sucesso_audio():
+    """Reseta o contador de falhas e avisa o dono se o áudio tinha acabado de
+    voltar a funcionar depois de ter cruzado o limite de alerta."""
+    global _eleven_consecutive_failures
+    if _eleven_consecutive_failures >= ELEVEN_FAIL_ALERT_THRESHOLD and OWNER_PHONE:
+        send_whatsapp(OWNER_PHONE, "✅ O áudio do agente voltou a funcionar normalmente.")
+    _eleven_consecutive_failures = 0
+
+
 def send_whatsapp_audio_elevenlabs(phone: str, message: str) -> bool:
     """Converte texto para áudio usando ElevenLabs API (retorna False se não houver chave ou se falhar)."""
     import base64
@@ -666,9 +712,11 @@ def send_whatsapp_audio_elevenlabs(phone: str, message: str) -> bool:
             if success:
                 logger.info(f"📤 Áudio ElevenLabs enviado com sucesso para {phone}")
                 _track_daily_send(phone)
+                _registrar_sucesso_audio()
                 return True
             else:
                 logger.error(f"❌ Falha ao enviar áudio ElevenLabs para {phone}: {result}")
+                _registrar_falha_audio(f"Evolution recusou o envio: {result}")
                 return False
         finally:
             if os.path.exists(temp_path):
@@ -684,9 +732,11 @@ def send_whatsapp_audio_elevenlabs(phone: str, message: str) -> bool:
         except Exception:
             corpo = "(sem corpo)"
         logger.error(f"Erro ao gerar/enviar áudio ElevenLabs para {phone}: HTTP {e.code} — {corpo}")
+        _registrar_falha_audio(f"HTTP {e.code} — {corpo[:200]}")
         return False
     except Exception as e:
         logger.error(f"Erro ao gerar/enviar áudio ElevenLabs para {phone}: {e}")
+        _registrar_falha_audio(str(e))
         return False
 
 
