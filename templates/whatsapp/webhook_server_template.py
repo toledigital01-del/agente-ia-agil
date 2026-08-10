@@ -469,10 +469,10 @@ def _process_message(phone: str, name: str, text: str, is_audio: bool):
         return
 
     try:
-        response, media_requests = handle_message(phone, name, text)
+        response, media_requests, forcar_texto = handle_message(phone, name, text)
         if not response:
             return
-        if is_audio:
+        if is_audio and not forcar_texto:
             if not send_whatsapp_audio(phone, response):
                 send_whatsapp(phone, response)
         else:

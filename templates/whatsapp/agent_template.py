@@ -188,6 +188,13 @@ CHECKOUT_LINK = client_config.get("checkout_link", "")
 # fechar a venda mesmo sem a frase do cliente bater com is_purchase_intent().
 LINK_PLACEHOLDER_PATTERN = re.compile(r"\[[^\]]{0,80}link[^\]]{0,80}\]", re.IGNORECASE)
 
+# Tag que a IA escreve quando a mensagem TEM que ser entregue por escrito
+# mesmo se o cliente mandou áudio (ex: resumo final de configuração — pedido
+# do cliente, 2026-08-10: mais fácil o lead conferir item por item lendo do
+# que ouvindo tudo de uma vez em áudio). watcher.py usa essa flag pra
+# ignorar o is_audio da mensagem recebida só nesse caso específico.
+TEXTO_APENAS_PATTERN = re.compile(r"\[\s*TEXTO_APENAS\s*\]\s*", re.IGNORECASE)
+
 # ── Biblioteca de mídia (fotos/vídeos reais de produto) ─────────────────────
 # A IA pode escrever [FOTO: chave] ou [FOTO: chave:todas] ou [VIDEO: chave]
 # na resposta quando achar que uma foto/vídeo ajuda o lead a decidir — o
@@ -248,6 +255,17 @@ def extract_media_requests(response: str) -> tuple:
     clean = VIDEO_TAG_PATTERN.sub(_resolver_video, clean)
     clean = re.sub(r"[ \t]+\n", "\n", clean).strip()
     return clean, media_files
+
+
+def extract_force_text_flag(response: str) -> tuple:
+    """Detecta a tag [TEXTO_APENAS] e remove do texto visível. Retorna
+    (texto_limpo, forcar_texto) -- forcar_texto=True instrui o watcher a
+    mandar por escrito mesmo se o cliente tiver perguntado por áudio."""
+    forcar_texto = bool(TEXTO_APENAS_PATTERN.search(response))
+    if not forcar_texto:
+        return response, False
+    limpo = TEXTO_APENAS_PATTERN.sub("", response).strip()
+    return limpo, True
 
 
 DB_PATH = str(client_config.DB_PATH)
@@ -420,14 +438,16 @@ def handle_message(phone: str, sender_name: str, text: str) -> tuple:
         text: Conteúdo da mensagem
 
     Returns:
-        Tupla (resposta_texto, media_requests) — resposta_texto é None se não é trigger.
-        media_requests é uma lista de {"path": Path, "mediatype": "image"|"video"}
-        pra watcher.py enviar depois do texto.
+        Tupla (resposta_texto, media_requests, forcar_texto) — resposta_texto
+        é None se não é trigger. media_requests é uma lista de
+        {"path": Path, "mediatype": "image"|"video"} pra watcher.py enviar
+        depois do texto. forcar_texto=True quando a resposta tem que ir por
+        escrito mesmo se o cliente pediu áudio (ex: resumo final de config).
     """
 
     # 1. Verificar trigger
     if not is_trigger(text):
-        return None, []
+        return None, [], False
 
     # 2. Criar/carregar lead
     lead_id = create_lead(phone, name=sender_name)
@@ -648,6 +668,10 @@ def handle_message(phone: str, sender_name: str, text: str) -> tuple:
     # limpo (sem a tag), igual já fazemos com o placeholder de link.
     response, media_requests = extract_media_requests(response)
 
+    # 6.6. Extrair a tag [TEXTO_APENAS] (resumo final de configuração, etc.)
+    # — também some do texto salvo no histórico, igual as outras tags.
+    response, forcar_texto = extract_force_text_flag(response)
+
     # 7. Adicionar resposta do agente (já com o link real, se houver, e sem tags de mídia)
     messages.append({"role": "assistant", "content": response})
     add_message(lead_id, "assistant", response)
@@ -655,7 +679,7 @@ def handle_message(phone: str, sender_name: str, text: str) -> tuple:
     # 8. Salvar sessão
     save_session(lead_id, messages)
 
-    return response, media_requests
+    return response, media_requests, forcar_texto
 
 
 def test_trigger():
@@ -699,7 +723,7 @@ def main():
             if msg.lower() == "sair":
                 break
 
-            response, media_requests = handle_message(
+            response, media_requests, forcar_texto = handle_message(
                 phone=args.chat,
                 sender_name="Teste",
                 text=msg
@@ -707,6 +731,8 @@ def main():
 
             if response:
                 print(f"Agente: {response}\n")
+                if forcar_texto:
+                    print("  [forcaria envio por texto, mesmo se o cliente tivesse mandado audio]")
                 for item in media_requests:
                     print(f"  [enviaria {item['mediatype']}: {item['path']}]")
             else:

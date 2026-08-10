@@ -33,21 +33,51 @@ SOURCE_PATH = REPO_ROOT / "templates" / "whatsapp" / "watcher_template.py"
 
 def carregar_funcoes():
     """Extrai number_to_words, price_to_words e preprocess_text_for_tts
-    do arquivo fonte e devolve num namespace isolado."""
+    do arquivo fonte e devolve num namespace isolado. preprocess_text_for_tts
+    usa URL_PATTERN, que é definido bem antes no módulo (fora do trecho de
+    funções puras extraído aqui) -- extrai também essa linha específica em
+    vez de reimplementar a regex à mão, pra nunca divergir do valor real."""
     src = SOURCE_PATH.read_text(encoding="utf-8")
+
+    url_pattern_linha = next(
+        linha for linha in src.splitlines() if linha.strip().startswith("URL_PATTERN = re.compile")
+    )
+
     inicio = src.index("def number_to_words")
     fim = src.index("def add_tone_tags_for_v3")
     trecho = src[inicio:fim]
 
     namespace = {"re": re}
+    exec(compile(url_pattern_linha, str(SOURCE_PATH), "exec"), namespace)
     exec(compile(trecho, str(SOURCE_PATH), "exec"), namespace)
     return namespace
+
+
+AGENT_SOURCE_PATH = REPO_ROOT / "templates" / "whatsapp" / "agent_template.py"
+
+
+def carregar_extract_force_text_flag():
+    """Mesma ideia, mas extrai TEXTO_APENAS_PATTERN e extract_force_text_flag
+    de agent_template.py (função pura, só usa `re`)."""
+    src = AGENT_SOURCE_PATH.read_text(encoding="utf-8")
+    padrao_linha = next(
+        linha for linha in src.splitlines() if linha.strip().startswith("TEXTO_APENAS_PATTERN = re.compile")
+    )
+    inicio = src.index("def extract_force_text_flag")
+    fim = src.index("\n\n\n", inicio)
+    trecho = src[inicio:fim]
+
+    namespace = {"re": re}
+    exec(compile(padrao_linha, str(AGENT_SOURCE_PATH), "exec"), namespace)
+    exec(compile(trecho, str(AGENT_SOURCE_PATH), "exec"), namespace)
+    return namespace["extract_force_text_flag"]
 
 
 FUNCOES = carregar_funcoes()
 preprocess_text_for_tts = FUNCOES["preprocess_text_for_tts"]
 number_to_words = FUNCOES["number_to_words"]
 price_to_words = FUNCOES["price_to_words"]
+extract_force_text_flag = carregar_extract_force_text_flag()
 
 
 # Cada caso: (nome, texto de entrada, lista de substrings que TÊM que
@@ -149,6 +179,18 @@ CASOS = [
         ["um metro e cinquenta centímetros"],
         ["1,50 metros"],
     ),
+    (
+        "link 'www.algo' sem http(s):// também nunca é falado (seção 37)",
+        "acesse www.asaas.com/i/xyz123 pra pagar",
+        ["acesse", "pra pagar"],
+        ["www.", "asaas.com"],
+    ),
+    (
+        "medida '1,00 metros' -> singular, sem centímetros (regressão da seção 36)",
+        "a largura é 1,00 metros",
+        ["um metro"],
+        ["um metros", "centímetros"],
+    ),
 ]
 
 
@@ -181,7 +223,20 @@ def rodar_testes():
         if obtido != esperado:
             falhas.append(f"esperava {esperado!r}, obteve {obtido!r}")
 
-    total = len(CASOS) + len(extras)
+    # extract_force_text_flag (tag [TEXTO_APENAS], seção 37)
+    casos_forcar_texto = [
+        ("[TEXTO_APENAS]\nResumo: Rolô Blackout, 1,20x1,50m, branco.", "Resumo: Rolô Blackout, 1,20x1,50m, branco.", True),
+        ("Oi! Tudo bem?", "Oi! Tudo bem?", False),
+    ]
+    for entrada, texto_esperado, flag_esperada in casos_forcar_texto:
+        texto_obtido, flag_obtida = extract_force_text_flag(entrada)
+        if texto_obtido != texto_esperado or flag_obtida != flag_esperada:
+            falhas.append(
+                f"[extract_force_text_flag] entrada={entrada!r}\n"
+                f"  esperado: ({texto_esperado!r}, {flag_esperada}) obtido: ({texto_obtido!r}, {flag_obtida})"
+            )
+
+    total = len(CASOS) + len(extras) + len(casos_forcar_texto)
     if falhas:
         print(f"❌ {len(falhas)}/{total} verificações falharam:\n")
         for f in falhas:

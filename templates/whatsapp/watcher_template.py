@@ -94,7 +94,12 @@ WARMUP_DAILY_LIMITS = {0: 20, 3: 50, 7: 100, 14: 250}  # dias-desde-reconexão -
 
 # Link dentro de uma resposta em áudio precisa chegar TAMBÉM por escrito — o
 # cliente não consegue clicar num link falado. Ver seção 23 do SKILL.md.
-URL_PATTERN = re.compile(r"https?://\S+")
+# Cobre "www.algo" mesmo sem "http(s)://" na frente (2026-08-10, pedido do
+# cliente: a IA às vezes escreve/fala o link como "www.asaas.com/..." sem o
+# protocolo, e esse formato passava batido tanto aqui quanto na limpeza do
+# texto pro TTS em preprocess_text_for_tts — as duas usam essa mesma regex
+# agora, pra nunca mais divergir uma da outra).
+URL_PATTERN = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
 
 
 # ── Evolution API ─────────────────────────────────────────────────────────────
@@ -397,10 +402,13 @@ def preprocess_text_for_tts(text: str) -> str:
     """Prepara o texto para ser falado de forma perfeita, pausada e sem erros de números ou símbolos."""
     import re
 
-    # Nunca falar um link em voz alta (fica soletrando "h t t p dois pontos...") —
-    # o link já vai por escrito em mensagem separada (ver send_whatsapp_audio
-    # no loop principal). Remove a URL e limpa os espaços/pontuação que sobram.
-    text = re.sub(r"https?://\S+", "", text)
+    # Nunca falar um link em voz alta (fica soletrando "h t t p dois pontos..."
+    # ou "www ponto asaas ponto com") — o link já vai por escrito em mensagem
+    # separada (ver send_whatsapp_audio no loop principal). Usa o mesmo
+    # URL_PATTERN do módulo (cobre "www.algo" mesmo sem "http(s)://" na
+    # frente) pra nunca divergir da regex que decide o que reenviar por
+    # texto — ver seção 37 do SKILL.md, 2026-08-10.
+    text = URL_PATTERN.sub("", text)
 
     # Remover formatação Markdown — a IA escreve **negrito**, listas com "- " e
     # às vezes cabeçalhos "#", pensado pro texto do WhatsApp. Os símbolos soltos
@@ -1384,9 +1392,9 @@ def watch():
                     continue
 
                 try:
-                    response, media_requests = handle_message(phone, name, text)
+                    response, media_requests, forcar_texto = handle_message(phone, name, text)
                     if response:
-                        if is_audio:
+                        if is_audio and not forcar_texto:
                             logger.info(f"📤 Gerando e enviando resposta em áudio para {phone}...")
                             audio_success = send_whatsapp_audio(phone, response)
                             if not audio_success:
