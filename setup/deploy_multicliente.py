@@ -43,24 +43,38 @@ PROGRAM_DIR = "/opt/agente"
 CLIENTS_DIR = "/opt/clientes"
 
 # ── Unidades systemd ──────────────────────────────────────────────────────────
+# ⚠️ CORRIGIDO 2026-08-11 (ver seção 47 do SKILL.md): estes arquivos usam o
+# mecanismo NATIVO de template do systemd (`%i` = o texto depois do "@" no
+# nome usado em `systemctl start agente@<isso-aqui>`), em vez de gravar o
+# nome do cliente dentro do conteúdo do arquivo. São genéricos de verdade
+# agora -- o MESMO arquivo em /etc/systemd/system/agente@.service atende
+# qualquer cliente, presente ou futuro, sem nunca precisar ser reescrito.
+#
+# Antes disso, cada `--deploy --cliente X` sobrescrevia o arquivo inteiro
+# com o nome de X gravado dentro -- ou seja, instalar um SEGUNDO cliente
+# quebrava silenciosamente a definição de serviço do primeiro (o processo
+# dele continuava rodando até o próximo restart, mas com o nome errado
+# gravado, pronto pra reiniciar como o cliente errado). Nunca chegou a
+# acontecer de verdade porque só existiu um cliente (Ágil Persianas) até
+# aqui -- corrigido antes do segundo cliente entrar, não depois de quebrar.
 
 UNIT_WATCHER = """\
 [Unit]
-Description=Agente de Vendas WhatsApp (Evolution) - {cliente}
+Description=Agente de Vendas WhatsApp (Evolution) - %i
 After=network-online.target docker.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-Environment=AGENTE_CLIENTE={cliente}
+Environment=AGENTE_CLIENTE=%i
 Environment=AGENTE_CLIENTES_DIR=/opt/clientes
 Environment=PYTHONUNBUFFERED=1
 WorkingDirectory=/opt/agente
 ExecStart=/usr/bin/python3 /opt/agente/watcher.py
 Restart=always
 RestartSec=5
-StandardOutput=append:/opt/clientes/{cliente}/watcher.log
-StandardError=append:/opt/clientes/{cliente}/watcher.log
+StandardOutput=append:/opt/clientes/%i/watcher.log
+StandardError=append:/opt/clientes/%i/watcher.log
 
 [Install]
 WantedBy=multi-user.target
@@ -68,21 +82,21 @@ WantedBy=multi-user.target
 
 UNIT_WEBHOOK = """\
 [Unit]
-Description=Agente de Vendas WhatsApp (Meta Webhook) - {cliente}
+Description=Agente de Vendas WhatsApp (Meta Webhook) - %i
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-Environment=AGENTE_CLIENTE={cliente}
+Environment=AGENTE_CLIENTE=%i
 Environment=AGENTE_CLIENTES_DIR=/opt/clientes
 Environment=PYTHONUNBUFFERED=1
 WorkingDirectory=/opt/agente
 ExecStart=/usr/bin/python3 /opt/agente/webhook_server.py
 Restart=always
 RestartSec=5
-StandardOutput=append:/opt/clientes/{cliente}/webhook.log
-StandardError=append:/opt/clientes/{cliente}/webhook.log
+StandardOutput=append:/opt/clientes/%i/webhook.log
+StandardError=append:/opt/clientes/%i/webhook.log
 
 [Install]
 WantedBy=multi-user.target
@@ -166,14 +180,19 @@ def deploy_via_ssh(host: str, user: str, key_path: str,
         ssh_run("pip3 install -q fastapi uvicorn")
 
     # 5. Instalar e ativar serviço systemd
+    # A unidade é genérica (usa %i, ver comentário acima de UNIT_WATCHER) --
+    # gravar ela de novo a cada deploy é seguro e idempotente, o conteúdo é
+    # sempre o mesmo texto pra qualquer cliente. É `systemctl start/enable
+    # agente@<cliente>` que faz o systemd substituir %i por <cliente>
+    # sozinho, não este script.
     service_name = f"agente-webhook@{cliente}" if modo == "webhook" else f"agente@{cliente}"
-    unit_content = (UNIT_WEBHOOK if modo == "webhook" else UNIT_WATCHER).format(cliente=cliente)
+    unit_content = UNIT_WEBHOOK if modo == "webhook" else UNIT_WATCHER
     unit_template_name = "agente-webhook@.service" if modo == "webhook" else "agente@.service"
     unit_path = f"/etc/systemd/system/{unit_template_name}"
 
     with sftp.open(unit_path, "w") as f:
         f.write(unit_content)
-    print(f"  ✅ Unidade systemd: {unit_path}")
+    print(f"  ✅ Unidade systemd (genérica, serve qualquer cliente): {unit_path}")
 
     ssh_run("systemctl daemon-reload")
     ssh_run(f"systemctl enable {service_name}")
@@ -217,10 +236,10 @@ def main():
     print("=" * 60)
 
     if args.print_only:
-        print("\nUnidade systemd — modo watcher:")
-        print(UNIT_WATCHER.format(cliente="<cliente>"))
+        print("\nUnidade systemd — modo watcher (genérica, %i = nome do cliente usado em 'systemctl start agente@<cliente>'):")
+        print(UNIT_WATCHER)
         print("\nUnidade systemd — modo webhook:")
-        print(UNIT_WEBHOOK.format(cliente="<cliente>"))
+        print(UNIT_WEBHOOK)
         return
 
     if args.deploy:

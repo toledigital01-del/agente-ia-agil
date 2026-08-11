@@ -17,10 +17,15 @@ Este script:
 3. Faz backup do estado atual de /opt/agente/*.py (só 1 backup rotativo,
    não acumula dezenas de arquivos .bak-* como o fluxo manual antigo).
 4. Copia os arquivos renderizados pra /opt/agente/.
-5. Reinicia o serviço systemd e mostra o status.
+5. Descobre TODOS os clientes instalados (uma pasta por cliente em
+   /opt/clientes/) e reinicia o serviço systemd de cada um -- código
+   compartilhado, então uma atualização vale pra todo mundo que roda nele
+   (ver seção 47 do SKILL.md: até 2026-08-11 isso reiniciava só um nome de
+   serviço fixo, e um segundo cliente ficaria sem reiniciar depois de um
+   deploy sem ninguém perceber).
 
 Se algo falhar em qualquer etapa, para imediatamente SEM aplicar nada
-parcial e sem reiniciar o serviço -- a versão anterior continua rodando.
+parcial e sem reiniciar nenhum serviço -- a versão anterior continua rodando.
 """
 import shutil
 import subprocess
@@ -29,7 +34,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEPLOY_DIR = Path("/opt/agente")
-SERVICE_NAME = "agente@agil-persianas.service"
+CLIENTS_DIR = Path("/opt/clientes")
 
 # (arquivo de origem, replaces de import a aplicar, nome de destino)
 # Só agent_template.py precisa de replace -- os outros já importam pelos
@@ -108,14 +113,34 @@ def aplicar(renderizados):
     print("Arquivos copiados para", DEPLOY_DIR)
 
 
-def reiniciar_servico():
-    subprocess.run(["systemctl", "restart", SERVICE_NAME], check=True)
-    resultado = subprocess.run(
-        ["systemctl", "is-active", SERVICE_NAME], capture_output=True, text=True
+def descobrir_clientes() -> list:
+    """Lista os clientes instalados nesta VPS (uma pasta com config.json em
+    /opt/clientes/) -- é assim que sabemos quais serviços systemd existem
+    sem precisar de uma lista mantida na mão em algum lugar."""
+    if not CLIENTS_DIR.exists():
+        return []
+    return sorted(
+        p.name for p in CLIENTS_DIR.iterdir()
+        if p.is_dir() and (p / "config.json").exists()
     )
-    print("Status do serviço:", resultado.stdout.strip())
-    if resultado.stdout.strip() != "active":
-        print("⚠️  Serviço não ficou ativo -- verifique com: journalctl -u", SERVICE_NAME)
+
+
+def reiniciar_servicos():
+    clientes = descobrir_clientes()
+    if not clientes:
+        print(f"⚠️  Nenhum cliente encontrado em {CLIENTS_DIR} -- nada pra reiniciar.")
+        return
+    print(f"Clientes encontrados: {', '.join(clientes)}")
+    for cliente in clientes:
+        service_name = f"agente@{cliente}.service"
+        subprocess.run(["systemctl", "restart", service_name], check=True)
+        resultado = subprocess.run(
+            ["systemctl", "is-active", service_name], capture_output=True, text=True
+        )
+        status = resultado.stdout.strip()
+        print(f"Status de {service_name}: {status}")
+        if status != "active":
+            print(f"⚠️  {service_name} não ficou ativo -- verifique com: journalctl -u {service_name}")
 
 
 def main():
@@ -127,8 +152,8 @@ def main():
     fazer_backup()
     print("== Aplicando ==")
     aplicar(renderizados)
-    print("== Reiniciando serviço ==")
-    reiniciar_servico()
+    print("== Reiniciando serviços (todos os clientes instalados) ==")
+    reiniciar_servicos()
     print("== Deploy concluído ==")
 
 
