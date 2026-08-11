@@ -233,6 +233,7 @@ Mais simples que pós-venda/agendamento — não precisa de detector de intenç�
 - **Arquivo por cliente:** `/opt/clientes/<cliente>/faq.json` — lista de `{"pergunta": "...", "resposta": "..."}`. Se o arquivo não existir (cliente sem FAQ cadastrado), o mecanismo simplesmente não injeta nada — zero impacto pra quem não usa.
 - **Mecanismo:** `agent_core_template.py` lê o arquivo em tempo de execução (na importação do módulo) e acrescenta um bloco formatado (`P: ... / R: ...`) direto no `SYSTEM_PROMPT`, com a instrução de **nunca inventar** política/prazo/garantia que não esteja na lista. Pra atualizar uma resposta, basta editar o `faq.json` e reiniciar o serviço — não precisa regenerar o prompt inteiro.
 - **Por que não tem detector de código:** ao contrário de pós-venda (que precisa buscar um status real no banco) e agendamento (que precisa abrir um registro pendente), FAQ é só conhecimento — a IA decide sozinha quando uma pergunta bate com uma entrada, igual já faz com preço/regras de negócio no resto do prompt.
+- **⚠️ Não vem pronto — precisa ser perguntado no onboarding.** Diferente de pós-venda/agendamento/NPS (que funcionam sem nenhum dado extra), esse módulo fica inerte até existir um `faq.json` real. **Pergunta a acrescentar no onboarding de qualquer cliente novo:** "Quais as dúvidas mais comuns que seus clientes fazem, e como você responde?" — vira as entradas do `faq.json` daquele cliente.
 
 ### 43. Módulo Pesquisa de Satisfação — NPS (added 2026-08-11)
 - **Tabela `nps_responses`** (`sessions_template.py`): `lead_id`, `phone`, `context` (ex: "pedido #3"), `rating`, `comment`, `status` (`pendente`/`respondido`).
@@ -246,6 +247,7 @@ Mais simples que pós-venda/agendamento — não precisa de detector de intenç�
 - **Oferta:** toda vez que um pagamento é confirmado (`process_payment_followups()`, mesmo ponto onde o pedido é criado — seção 40), o comprador recebe uma mensagem convidando a indicar um amigo, citando o próprio número como código.
 - **Conversão:** no mesmo evento de pagamento confirmado, se o comprador tinha sido indicado por alguém (`get_referral_by_referred_phone`), a indicação vira `convertido` e **quem indicou é avisado automaticamente** com o benefício.
 - **Benefício configurável por cliente:** `client_config.get("referral_benefit_text", "um desconto especial")` — cada cliente define o próprio texto de benefício (ex: "10% de desconto na próxima compra") sem precisar mexer em código.
+- **⚠️ Funciona sem configurar, mas fica vago — vale perguntar no onboarding.** Sem `referral_benefit_text` no `config.json`, a mensagem sai com o texto genérico "um desconto especial", que não é muito convincente. **Pergunta a acrescentar no onboarding de qualquer cliente novo:** "Se um cliente indicar um amigo, o que os dois ganham?" — vira o `referral_benefit_text` daquele cliente.
 - **Implementado nos dois transportes** (`watcher.py`/Evolution e `webhook_server.py`/Meta Cloud API), mesmo princípio de sincronia já usado pra pós-venda/agendamento (seção 40/41) e mídia (seção 22).
 
 ### 45. Testes dos módulos de pós-venda/agendamento/NPS/indicação
