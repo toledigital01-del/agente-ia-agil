@@ -97,88 +97,37 @@ def extract_cep(text: str) -> str:
         return f"{match.group(1)}{match.group(2)}"
     return None
 
-_ESTADOS_BR = [
-    "Minas Gerais", "São Paulo", "Rio de Janeiro", "Rio Grande do Sul", "Rio Grande do Norte",
-    "Mato Grosso do Sul", "Mato Grosso", "Espírito Santo", "Santa Catarina", "Distrito Federal",
-    "Acre", "Alagoas", "Amapá", "Amazonas", "Bahia", "Ceará", "Goiás", "Maranhão", "Pará",
-    "Paraíba", "Paraná", "Pernambuco", "Piauí", "Rondônia", "Roraima", "Sergipe", "Tocantins",
-]
-_ESTADOS_PATTERN = re.compile(
-    "|".join(re.escape(e) for e in sorted(_ESTADOS_BR, key=len, reverse=True)), re.IGNORECASE
-)
+# ── Preço/frete: plugin específico de cada cliente (added 2026-08-11) ──────
+# Preço, tabela de produtos, marca de referência de mercado e cálculo de
+# frete são coisas de CADA negócio, não do motor. Um cliente que vende por
+# catálogo fixo (sem m²) ou não usa frete simplesmente não tem esse arquivo,
+# e os blocos de preço/frete abaixo não fazem nada (sem erro). Ver
+# ../agentes-ia-vendas-agil-persianas/pricing_agil_persianas.py como
+# exemplo real (extraído daqui em 2026-08-11 -- até então essa lógica
+# morava fisicamente no motor, apesar do SKILL.md já dizer que tinha sido
+# "movida pro arquivo do cliente" há dias -- só a documentação tinha sido
+# movida, não o código).
+#
+# Interface esperada do plugin (client_config.CLIENT_DIR / "pricing.py"):
+#   extract_color(text) -> str | None
+#   get_price_quotes(width_m, height_m, cor) -> dict[str, float]
+#   get_default_price(width_m, height_m, cor) -> float
+#   get_shipping_quote(cep, width_m, height_m, quantity=1) -> dict
+import importlib.util as _importlib_util
+
+_PRICING_PLUGIN_PATH = client_config.CLIENT_DIR / "pricing.py"
 
 
-def _sanitize_regiao(texto: str) -> str:
-    """Remove nomes de estado do texto — usado na descrição de frete que vem da
-    Frenet, que às vezes cita a rota de origem/destino. Duas razões pra isso:
-    1) evita vazar o estado onde a empresa fica (regra de confidencialidade
-       industrial já existente no prompt);
-    2) o nome de estado dentro dessa descrição estava saindo esquisito quando
-       lido em voz alta pela IA (cliente reportou "bug" na pronúncia,
-       2026-08-03) — sem o nome do estado ali, a frase fica normal de falar."""
-    if not texto:
-        return texto
-    limpo = _ESTADOS_PATTERN.sub("", texto)
-    limpo = re.sub(r"\bpara\b", "", limpo, flags=re.IGNORECASE)  # sobra de "X para Y"
-    limpo = re.sub(r"\(\s*\)", "", limpo)  # parênteses que ficaram vazios
-    limpo = re.sub(r"\s{2,}", " ", limpo)
-    return limpo.strip(" -/,")
+def _load_pricing_plugin():
+    if not _PRICING_PLUGIN_PATH.exists():
+        return None
+    spec = _importlib_util.spec_from_file_location("client_pricing", _PRICING_PLUGIN_PATH)
+    module = _importlib_util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
-def get_shipping_quote(recipient_cep: str, width_m: float, height_m: float, quantity: int = 1) -> dict:
-    """Consulta frete na API da Frenet."""
-    url = "https://api.frenet.com.br/shipping/quote"
-    token = client_config.get("frenet_token", "")
-    
-    recipient_cep = "".join(filter(str.isdigit, recipient_cep))
-    if len(recipient_cep) != 8:
-        return {"error": "CEP inválido"}
-
-    length_cm = int(width_m * 100)
-    height_cm = 10
-    width_cm = 10
-    area = width_m * height_m
-    weight_kg = max(1.0, area * 2.0)
-
-    data = {
-        "SellerCEP": "36015000",
-        "RecipientCEP": recipient_cep,
-        "ShipmentInvoiceValue": float(max(150.00, area * 150.00)),
-        "RecipientCountry": "BR",
-        "ShippingItemArray": [
-            {
-                "Height": height_cm,
-                "Length": length_cm,
-                "Width": width_cm,
-                "Weight": weight_kg,
-                "Quantity": int(quantity)
-            }
-        ]
-    }
-
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(data).encode(),
-        headers={"Content-Type": "application/json", "token": token},
-        method="POST"
-    )
-
-    try:
-        with urllib.request.urlopen(req, timeout=10) as r:
-            res = json.loads(r.read().decode())
-            services = res.get("ShippingSevicesArray", [])
-            quotes = []
-            for s in services:
-                if s.get("Error") == False or str(s.get("Error")).lower() == "false":
-                    quotes.append({
-                        "carrier": s.get("Carrier"),
-                        "description": s.get("ServiceDescription"),
-                        "price": float(s.get("ShippingPrice")),
-                        "days": int(s.get("DeliveryTime"))
-                    })
-            return {"quotes": quotes}
-    except Exception as e:
-        return {"error": str(e)}
+PRICING = _load_pricing_plugin()
 
 CHECKOUT_LINK = client_config.get("checkout_link", "")
 
@@ -270,93 +219,16 @@ def extract_force_text_flag(response: str) -> tuple:
 
 DB_PATH = str(client_config.DB_PATH)
 
-# ── Tabela de preços de referência (coletada da Fácil Persianas em 2026-07-29) ─
-# Pontos reais (área em m², preço em R$), largura fixa em 100cm (variando a
-# altura), direto do site oficial. Confirmado que o preço de mercado NÃO é uma
-# reta simples de R$/m² (tag "autopriced-by-table-pricing" no próprio site) —
-# a taxa por m² adicional varia de trecho pra trecho (de ~R$26 a ~R$72/m² só
-# na faixa de 1,2 a 1,8m² do Blackout, por exemplo). Por isso interpolamos
-# entre pontos reais em vez de multiplicar por uma taxa fixa.
-# Fonte completa (mais categorias e larguras): docs/tabela_precos_referencia.json
-PRECO_ROLO_BLACKOUT = [
-    (0.36, 147.39), (1.20, 264.91), (1.43, 267.78), (1.50, 272.83), (1.58, 278.56),
-    (1.66, 284.34), (1.74, 290.07), (1.80, 294.39), (1.90, 301.58), (2.00, 281.75),
-    (2.10, 288.32), (2.20, 294.88), (2.30, 301.45), (2.40, 308.00), (2.50, 314.57),
-    (2.65, 406.76), (2.70, 410.23), (2.90, 424.09),
-]
-PRECO_ROLO_TELA_SOLAR = [
-    (0.36, 117.33), (1.20, 342.22), (1.43, 346.38), (1.50, 353.68), (1.58, 362.00),
-    (1.66, 370.34), (1.74, 378.71), (1.80, 384.94), (1.90, 395.36), (2.00, 472.11),
-    (2.10, 484.24), (2.20, 496.38), (2.30, 508.46), (2.40, 520.61), (2.50, 532.74),
-    (2.65, 731.80), (2.70, 738.69), (2.90, 766.21),
-]
-PRECO_DOUBLE_VISION = [
-    (0.36, 302.98), (1.20, 529.84), (1.43, 529.84), (1.50, 597.01), (1.90, 611.69),
-    (2.00, 767.31), (2.10, 814.78), (2.20, 833.58), (2.30, 852.40), (2.40, 871.19),
-    (2.50, 890.00), (2.65, 918.19), (2.70, 927.61),
-]
-
-
-def interpolar_preco(area_m2: float, pontos: list) -> float:
-    """Preço pra uma área, usando pontos reais (área, preço) coletados de mercado.
-
-    IMPORTANTE: a Fácil Persianas NÃO interpola suavemente entre tamanhos —
-    testamos ao vivo no site deles (trocando largura/altura no seletor real)
-    e confirmamos que o preço "arredonda pra cima" pro próximo tamanho real
-    (ex: 1,00m x 1,00m cobra o mesmo que 1,00m x 1,20m, porque não existe
-    corte menor que 1,20m de altura pra essa largura — validamos ponto a
-    ponto: 1x1m cobra R$264,91 de verdade, não um valor interpolado menor
-    como R$236,93). Por isso usamos o preço do próximo ponto real >= área
-    pedida (degrau), em vez de uma média entre dois pontos — a média dava
-    um valor mais barato do que a Fácil realmente cobra."""
-    pontos = sorted(pontos)
-    for a, p in pontos:
-        if area_m2 <= a:
-            return p
-    # Área maior que o maior ponto coletado: aí sim extrapola pela inclinação
-    # do último trecho, já que não há um próximo degrau real pra usar.
-    (a0, p0), (a1, p1) = pontos[-2], pontos[-1]
-    taxa = (p1 - p0) / (a1 - a0)
-    return p1 + (area_m2 - a1) * taxa
-
-
-# ── Consulta de preço AO VIVO na Fácil Persianas (com fallback pra tabela estática) ──
-# A cor muda o preço de verdade no site deles (ex: Blackout Branca R$147,39 vs
-# Preta R$160,76 na mesma peça) — por isso buscamos o produto certo por cor,
-# não só por categoria. Se a busca ao vivo falhar por qualquer motivo (site
-# fora do ar, timeout, produto não encontrado), cai pra tabela estática
-# (PRECO_ROLO_BLACKOUT etc.) como rede de segurança.
-FACIL_PERSIANAS_BASE = "https://www.facilpersianas.com.br"
-
-CORES_CONHECIDAS = ["branco", "branca", "bege", "cinza", "preto", "preta", "marfim"]
-
-HANDLES_ROLO_BLACKOUT = {
-    "branco": "persiana-rolo-blackout-branca", "branca": "persiana-rolo-blackout-branca",
-    "bege": "persiana-rolo-blackout-bege",
-    "cinza": "persiana-rolo-blackout-cinza",
-    "preto": "persiana-rolo-blackout-preta", "preta": "persiana-rolo-blackout-preta",
-}
-HANDLES_ROLO_TELA_SOLAR = {
-    "branco": "persiana-rolo-tela-solar-3-branca", "branca": "persiana-rolo-tela-solar-3-branca",
-    "bege": "persiana-rolo-tela-solar-3-bege",
-    "cinza": "persiana-rolo-tela-solar-3-cinza",
-    "preto": "persiana-rolo-tela-solar-3-preta", "preta": "persiana-rolo-tela-solar-3-preta",
-}
-HANDLES_DOUBLE_VISION = {
-    "branco": "persiana-double-vision-semi-blackout-branca-acinzentada",
-    "branca": "persiana-double-vision-semi-blackout-branca-acinzentada",
-    "cinza": "persiana-double-vision-semi-blackout-cinza",
-    "preto": "persiana-double-vision-semi-blackout-preta", "preta": "persiana-double-vision-semi-blackout-preta",
-}
+# extract_color(): agora vem do plugin de preço do cliente (PRICING, ver
+# acima) -- lista de cores conhecidas é catálogo do negócio, não do motor.
 
 
 def extract_color(text: str) -> str:
-    """Extrai o nome de cor conhecida de um texto (ex: 'branco', 'cinza')."""
-    text_lower = text.lower()
-    for cor in CORES_CONHECIDAS:
-        if cor in text_lower:
-            return cor
-    return None
+    """Delega pro plugin de preço do cliente, se existir. Sem plugin (cliente
+    que não vende por cor/m²), sempre retorna None."""
+    if not PRICING:
+        return None
+    return PRICING.extract_color(text)
 
 
 ADDRESS_STREET_KEYWORDS = [
@@ -379,48 +251,6 @@ def extract_address(text: str) -> str:
     if (has_street_kw and has_number) or (has_street_kw and has_bairro_kw) or (has_bairro_kw and has_number):
         return text.strip()
     return None
-
-
-def buscar_preco_ao_vivo(handle: str, area_m2: float, timeout: int = 5) -> float:
-    """Busca o preço real no site da Fácil Persianas pra essa área (m²), via
-    interpolação entre as variantes (largura-altura) reais mais próximas.
-    Retorna None em qualquer falha — quem chamar precisa ter um fallback."""
-    if not handle:
-        return None
-    try:
-        url = f"{FACIL_PERSIANAS_BASE}/products/{handle}.json"
-        req = urllib.request.Request(url, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-            "Accept": "application/json,text/html;q=0.9,*/*;q=0.8",
-            "Accept-Language": "pt-BR,pt;q=0.9",
-        })
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        pontos = []
-        for v in data.get("product", {}).get("variants", []):
-            m = re.match(r"^(\d+)-(\d+)$", v.get("title", ""))
-            if not m:
-                continue
-            w_cm, h_cm = int(m.group(1)), int(m.group(2))
-            area = (w_cm / 100.0) * (h_cm / 100.0)
-            pontos.append((area, float(v["price"])))
-        if not pontos:
-            return None
-        return interpolar_preco(area_m2, pontos)
-    except Exception as e:
-        print(f"⚠️  Falha ao buscar preço ao vivo ({handle}): {e}")
-        return None
-
-
-def calcular_preco_modelo(handles_map: dict, tabela_fallback: list, charged_area: float, cor: str = None) -> float:
-    """Preço do modelo pra uma área/cor: tenta ao vivo primeiro, cai pra tabela
-    estática de referência se a busca ao vivo falhar."""
-    cor_norm = (cor or "branca").lower()
-    handle = handles_map.get(cor_norm) or handles_map.get("branca")
-    preco = buscar_preco_ao_vivo(handle, charged_area)
-    if preco is not None:
-        return preco
-    return interpolar_preco(charged_area, tabela_fallback)
 
 
 def is_trigger(text: str) -> bool:
@@ -621,36 +451,34 @@ def handle_message(phone: str, sender_name: str, text: str) -> tuple:
             "conversa parou — nunca finja que é a primeira mensagem dele.]"
         )
 
-    if saved_w and saved_h:
+    if saved_w and saved_h and PRICING:
         w_float = float(saved_w)
         h_float = float(saved_h)
         area = w_float * h_float
-        charged_area = max(1.80, area) # Área mínima cobrada de 1.80m² igual à Fácil Persianas!
 
-        # Preços buscados AO VIVO na Fácil Persianas pra essa área+cor (com
-        # fallback pra tabela estática de referência se a busca falhar).
-        p_blackout = calcular_preco_modelo(HANDLES_ROLO_BLACKOUT, PRECO_ROLO_BLACKOUT, charged_area, saved_cor)
-        p_solar = calcular_preco_modelo(HANDLES_ROLO_TELA_SOLAR, PRECO_ROLO_TELA_SOLAR, charged_area, saved_cor)
-        p_double = calcular_preco_modelo(HANDLES_DOUBLE_VISION, PRECO_DOUBLE_VISION, charged_area, saved_cor)
+        # Preço de cada produto do catálogo do cliente pra essa medida/cor
+        # (plugin decide como calcular -- tabela fixa, busca ao vivo, etc.).
+        precos = PRICING.get_price_quotes(w_float, h_float, saved_cor)
+        linhas_precos = "\n".join(f"- {nome}: R$ {preco:.2f}" for nome, preco in precos.items())
 
-        calc_info = f"[SISTEMA: Para as medidas de {w_float:.2f}m x {h_float:.2f}m (Área real: {area:.2f}m², Área cobrada/mínima: {charged_area:.2f}m²):\n"
-        calc_info += f"- Rolô Blackout: R$ {p_blackout:.2f}\n"
-        calc_info += f"- Rolô Tela Solar: R$ {p_solar:.2f}\n"
-        calc_info += f"- Double Vision: R$ {p_double:.2f}\n"
-        calc_info += "USE ESTES VALORES EXATOS NO SEU ORÇAMENTO! NUNCA INVENTE OUTROS PREÇOS!]"
+        calc_info = (
+            f"[SISTEMA: Para as medidas de {w_float:.2f}m x {h_float:.2f}m (Área: {area:.2f}m²):\n"
+            f"{linhas_precos}\n"
+            "USE ESTES VALORES EXATOS NO SEU ORÇAMENTO! NUNCA INVENTE OUTROS PREÇOS!]"
+        )
         prompt_injection.append(calc_info)
 
-    if saved_cep and saved_w and saved_h:
+    if saved_cep and saved_w and saved_h and PRICING:
         w_float = float(saved_w)
         h_float = float(saved_h)
-        quote_res = get_shipping_quote(saved_cep, w_float, h_float)
+        quote_res = PRICING.get_shipping_quote(saved_cep, w_float, h_float)
         if "quotes" in quote_res and quote_res["quotes"]:
             best_quote = min(quote_res["quotes"], key=lambda q: q["price"])
-            carrier = _sanitize_regiao(best_quote["carrier"])
-            desc = _sanitize_regiao(best_quote["description"])
+            carrier = best_quote["carrier"]
+            desc = best_quote["description"]
             price = best_quote["price"]
             days = best_quote["days"]
-            
+
             shipping_info = f"[SISTEMA: Cotação de Frete via Frenet para CEP {saved_cep}: {carrier} ({desc}) por R$ {price:.2f} - entrega em {days} dias úteis. Informe e cobre junto no fechamento!]"
             prompt_injection.append(shipping_info)
         elif "error" in quote_res:
@@ -764,19 +592,17 @@ def handle_message(phone: str, sender_name: str, text: str) -> tuple:
         saved_cor = get_metadata(lead_id, "cor")
 
         total_price = 0.0
-        if saved_w and saved_h:
+        if saved_w and saved_h and PRICING:
             try:
                 w_float = float(saved_w)
                 h_float = float(saved_h)
-                area = w_float * h_float
-                charged_area = max(1.80, area)
 
-                # Preço padrão (Rolô Blackout como padrão se não soubermos o exato modelo)
-                total_price = calcular_preco_modelo(HANDLES_ROLO_BLACKOUT, PRECO_ROLO_BLACKOUT, charged_area, saved_cor)
-                
+                # Preço padrão (modelo mais comum, se não soubermos o exato modelo)
+                total_price = PRICING.get_default_price(w_float, h_float, saved_cor)
+
                 # Somar frete se disponível
                 if saved_cep:
-                    quote_res = get_shipping_quote(saved_cep, w_float, h_float)
+                    quote_res = PRICING.get_shipping_quote(saved_cep, w_float, h_float)
                     if "quotes" in quote_res and quote_res["quotes"]:
                         total_price += min(quote_res["quotes"], key=lambda q: q["price"])["price"]
             except Exception:
