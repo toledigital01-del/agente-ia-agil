@@ -1161,6 +1161,21 @@ def handle_owner_command(phone: str, text: str) -> bool:
         logger.info(f"📦 Pedido de {target} atualizado pra \"{novo_status}\" por comando do dono.")
         send_whatsapp(OWNER_PHONE, f"✅ Pedido de {target} atualizado pra \"{novo_status}\".")
         send_whatsapp(target, f"Oi! Passando pra te avisar: seu pedido está \"{novo_status}\". 📦")
+
+        # NPS: quando o status marcado bate com "entregue" (ou variação —
+        # comparação por substring porque o status é texto livre do dono,
+        # não um enum fixo), dispara a pesquisa de satisfação na hora, junto
+        # com o aviso de status. Só pede uma vez por pedido (create_nps_request
+        # sempre cria pendente novo, mas como só disparamos aqui — um comando
+        # por pedido entregue — não duplica na prática).
+        if "entreg" in novo_status.lower():
+            lead_id = f"whatsapp_{target}"
+            sessions.create_nps_request(lead_id, target, context=f"pedido #{order_id}")
+            send_whatsapp(
+                target,
+                "Antes de eu deixar você em paz 😄 — de 0 a 10, o quanto você recomendaria "
+                "a gente pra um amigo? Pode responder só a nota, e se quiser comentar, fica à vontade!"
+            )
         return True
 
     # Agendamento: dono confirma ou recusa o pedido de agendamento pendente
@@ -1250,6 +1265,34 @@ def process_payment_followups():
                 sessions.create_order(lead_id, phone, description=descricao, status="em preparo")
                 logger.info(f"🎉 Pagamento confirmado para o lead {name} ({phone})! Pedido registrado.")
                 send_whatsapp(phone, f"Oba, {name}! 🎉 Confirmamos o recebimento do seu pagamento. O seu pedido de cortinas/persianas sob medida já foi encaminhado para o nosso setor de fabricação! Em breve te enviaremos o código de rastreamento por aqui. Qualquer dúvida, estou à disposição! 💪")
+
+                # Indicação/referral: se esse comprador tinha sido indicado por
+                # alguém, a conversão acontece agora (compra confirmada) — avisa
+                # quem indicou. Best-effort: nunca deve travar a confirmação de
+                # pagamento acima se algo aqui falhar.
+                try:
+                    referral = sessions.get_referral_by_referred_phone(phone)
+                    if referral:
+                        sessions.mark_referral_converted(referral["id"])
+                        beneficio = client_config.get("referral_benefit_text", "um desconto especial")
+                        send_whatsapp(
+                            referral["referrer_phone"],
+                            f"🎉 Boa notícia! A pessoa que você indicou pra gente acabou de comprar. "
+                            f"Você ganhou {beneficio} — é só chamar por aqui quando quiser usar!"
+                        )
+                except Exception as e:
+                    logger.error(f"Erro ao processar conversão de indicação para {phone}: {e}")
+
+                # Oferece o programa de indicação pro comprador — telefone dele
+                # vira o "código" que um amigo pode citar (extract_referral_phone
+                # em agent_template.py reconhece frases tipo "indicado por <numero>").
+                beneficio = client_config.get("referral_benefit_text", "um desconto especial")
+                send_whatsapp(
+                    phone,
+                    f"Ah, {name}, e uma coisa: se você indicar um amigo pra gente, é só ele "
+                    f"mencionar que foi indicado por {phone} quando chamar no WhatsApp — "
+                    f"vocês dois ganham {beneficio}! 🎁"
+                )
                 return  # anti-bloqueio: só 1 envio por ciclo (ver docstring)
                 
             # 2. Se não foi pago, calcular o tempo decorrido e enviar lembrete correspondente

@@ -49,6 +49,8 @@ is_order_status_request = CORE["is_order_status_request"]
 is_scheduling_request = CORE["is_scheduling_request"]
 _has_datetime_hint = TEMPLATE["_has_datetime_hint"]
 _infer_appointment_tipo = TEMPLATE["_infer_appointment_tipo"]
+_extract_nps_rating = TEMPLATE["_extract_nps_rating"]
+extract_referral_phone = TEMPLATE["extract_referral_phone"]
 
 
 # ── is_order_status_request: (nome, texto, esperado) ────────────────────────
@@ -93,6 +95,28 @@ CASOS_TIPO = [
 ]
 
 
+# ── _extract_nps_rating: (nome, texto, esperado) ─────────────────────────────
+CASOS_NPS = [
+    ("nota isolada", "9", 9),
+    ("nota dez", "10", 10),
+    ("nota zero", "0", 0),
+    ("nota com a palavra 'nota'", "nota 8", 8),
+    ("nota com comentário depois", "10, adorei o atendimento!", 10),
+    ("mensagem sem nota no início", "adorei, dou nota 10", None),
+    ("mensagem qualquer sem número", "muito bom o atendimento", None),
+    ("vazio", "", None),
+]
+
+# ── extract_referral_phone: (nome, texto, esperado) ──────────────────────────
+CASOS_REFERRAL = [
+    ("indicado por", "fui indicado por 5599999999", "5599999999"),
+    ("indicação de", "vim por indicação de 5588888888", "5588888888"),
+    ("indicado numero", "indicado pelo número 5599999999", "5599999999"),
+    ("sem indicação", "quero comprar uma persiana", None),
+    ("vazio", "", None),
+]
+
+
 def rodar_casos(nome_grupo, funcao, casos, aridade=2):
     total = len(casos)
     falhas = []
@@ -118,6 +142,8 @@ def main():
     ok &= rodar_casos("is_scheduling_request", is_scheduling_request, CASOS_SCHEDULING)
     ok &= rodar_casos("_has_datetime_hint", _has_datetime_hint, CASOS_DATETIME_HINT)
     ok &= rodar_casos("_infer_appointment_tipo", _infer_appointment_tipo, CASOS_TIPO)
+    ok &= rodar_casos("_extract_nps_rating", _extract_nps_rating, CASOS_NPS)
+    ok &= rodar_casos("extract_referral_phone", extract_referral_phone, CASOS_REFERRAL)
 
     print("\n" + ("✅ TUDO OK" if ok else "❌ ALGUM TESTE FALHOU"))
     sys.exit(0 if ok else 1)

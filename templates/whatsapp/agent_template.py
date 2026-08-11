@@ -26,7 +26,7 @@ from datetime import datetime
 sys.path.insert(0, str(Path(__file__).parent.parent / "shared"))
 from agent_core_template import call_ai, is_purchase_intent, is_handoff_request, is_frustration_keyword, is_repeated_question, is_order_status_request, is_scheduling_request, format_checkout_message, SYSTEM_PROMPT, SESSION_TTL
 import client_config
-from sessions_template import init_db, load_session, save_session, create_lead, add_message, mark_checkout_sent, save_metadata, get_metadata, get_lead_history, get_latest_order, create_appointment, get_pending_appointment_by_lead
+from sessions_template import init_db, load_session, save_session, create_lead, add_message, mark_checkout_sent, save_metadata, get_metadata, get_lead_history, get_latest_order, create_appointment, get_pending_appointment_by_lead, get_pending_nps, save_nps_response, get_referral_by_referred_phone, create_referral
 
 # Inicializar o banco de dados automaticamente ao importar o módulo
 init_db()
@@ -465,6 +465,40 @@ def _infer_appointment_tipo(text: str) -> str:
     return "atendimento"
 
 
+# ── NPS: extração leve de nota (added 2026-08-11) ────────────────────────────
+# Só reconhece a nota quando ela vem logo no início da mensagem (com ou sem
+# a palavra "nota" na frente) -- é assim que gente responde de verdade uma
+# pergunta de "de 0 a 10..." ("9", "nota 8", "10, adorei"). Não varre a
+# mensagem inteira atrás de qualquer número solto, pra não confundir com
+# outra coisa (endereço, medida, CEP) que por acaso comece com dígito.
+_NPS_PATTERN = re.compile(r"^\s*(?:nota\s*)?(10|[0-9])\b")
+
+
+def _extract_nps_rating(text: str):
+    """Extrai a nota (0-10) de uma resposta de pesquisa de satisfação, ou
+    None se a mensagem não parece uma resposta de nota."""
+    if not text:
+        return None
+    m = _NPS_PATTERN.match(text.strip().lower())
+    return int(m.group(1)) if m else None
+
+
+# ── Indicação/referral: extração do telefone de quem indicou (added 2026-08-11) ──
+_REFERRAL_PATTERN = re.compile(
+    r"indica(?:d[oa]|[cç][aã]o)\s*(?:por|pel[oa]|de)?\s*(?:o\s*)?(?:n[uú]mero\s*)?(\d{8,13})",
+    re.IGNORECASE,
+)
+
+
+def extract_referral_phone(text: str):
+    """Extrai o telefone de quem indicou, de frases como 'fui indicado por
+    5599999999' ou 'indicação de 5599999999'. Retorna None se não achar."""
+    if not text:
+        return None
+    m = _REFERRAL_PATTERN.search(text)
+    return m.group(1) if m else None
+
+
 def handle_message(phone: str, sender_name: str, text: str) -> tuple:
     """
     Processa mensagem e retorna resposta do agente com cálculos físicos e cotação de frete.
@@ -518,6 +552,14 @@ def handle_message(phone: str, sender_name: str, text: str) -> tuple:
     endereco = extract_address(text)
     if endereco:
         save_metadata(lead_id, "endereco", endereco)
+
+    # Indicação/referral: lead diz ter sido indicado por outro telefone —
+    # registra só na primeira vez (get_referral_by_referred_phone evita
+    # duplicar se ele mencionar de novo em outra mensagem) e nunca se a
+    # pessoa "se indicou" (erro de digitação/mesma pessoa).
+    referral_phone = extract_referral_phone(text)
+    if referral_phone and referral_phone != phone and not get_referral_by_referred_phone(phone):
+        create_referral(referral_phone, phone)
 
     # Qualquer um desses dados novos é progresso real na conversa -- zera o
     # contador de "cliente travado/frustrado" (watcher.py,
@@ -662,6 +704,25 @@ def handle_message(phone: str, sender_name: str, text: str) -> tuple:
                 "internamente e o responsável foi avisado. Confirme pra ele que anotou esse horário e que vai "
                 "confirmar com o responsável antes de virar definitivo — deixe claro que ainda não é uma "
                 "confirmação, é um pedido em análise.]"
+            )
+
+    # ── NPS: cliente respondendo uma pesquisa de satisfação pendente ────────
+    pending_nps = get_pending_nps(lead_id)
+    if pending_nps:
+        nota = _extract_nps_rating(text)
+        if nota is not None:
+            comentario = text.strip()
+            save_nps_response(pending_nps["id"], nota, comentario)
+            prompt_injection.append(
+                f"[SISTEMA: O cliente respondeu a pesquisa de satisfação com nota {nota}/10 "
+                f"(comentário: \"{comentario}\"). Agradeça de forma calorosa e breve por essa "
+                "resposta específica, sem tentar vender mais nada nessa mesma mensagem.]"
+            )
+        else:
+            prompt_injection.append(
+                "[SISTEMA: Existe uma pesquisa de satisfação pendente pra esse cliente (pedimos uma nota "
+                "de 0 a 10), mas essa mensagem dele não parece uma resposta de nota. Responda o assunto "
+                "normal da mensagem dele; não insista na pesquisa nesta resposta.]"
             )
 
     # Injetar instruções calculadas dinamicamente no final do histórico enviado à IA

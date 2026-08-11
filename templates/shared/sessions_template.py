@@ -112,6 +112,38 @@ def init_db():
         )
     """)
 
+    # Tabela de pesquisas de satisfação (módulo NPS) — pode ser pedida mais de
+    # uma vez pro mesmo lead ao longo do tempo (uma por pedido/atendimento
+    # concluído), por isso tabela própria em vez de metadata.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS nps_responses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            lead_id TEXT NOT NULL,
+            phone TEXT NOT NULL,
+            context TEXT,
+            rating INTEGER,
+            comment TEXT,
+            status TEXT NOT NULL DEFAULT 'pendente',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(lead_id) REFERENCES leads(id)
+        )
+    """)
+
+    # Tabela de indicações (módulo indicação/referral) — quem indicou quem,
+    # rastreado por telefone (mais simples que gerar um código próprio, já
+    # que o telefone já é o identificador único de cada lead).
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS referrals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            referrer_phone TEXT NOT NULL,
+            referred_phone TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pendente',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -526,3 +558,106 @@ def update_appointment_status_by_lead(lead_id: str, status: str):
     conn.commit()
     conn.close()
     return appointment_id
+
+
+# ── Pesquisa de satisfação / NPS (módulo NPS) ────────────────────────────────
+
+def create_nps_request(lead_id: str, phone: str, context: str = "") -> int:
+    """Registra que uma pesquisa de satisfação foi pedida pro lead (ex: depois
+    do pedido marcado como entregue). Retorna o id."""
+    conn = _db()
+    cursor = conn.cursor()
+    now = datetime.now().isoformat()
+    cursor.execute(
+        """
+        INSERT INTO nps_responses (lead_id, phone, context, status, created_at, updated_at)
+        VALUES (?, ?, ?, 'pendente', ?, ?)
+        """,
+        (lead_id, phone, context, now, now)
+    )
+    nps_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return nps_id
+
+
+def get_pending_nps(lead_id: str):
+    """Retorna a pesquisa NPS pendente mais recente do lead, ou None."""
+    conn = _db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, context, created_at FROM nps_responses "
+        "WHERE lead_id = ? AND status = 'pendente' ORDER BY created_at DESC LIMIT 1",
+        (lead_id,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return dict(row)
+
+
+def save_nps_response(nps_id: int, rating: int, comment: str = ""):
+    """Salva a nota/comentário e marca a pesquisa como respondida."""
+    conn = _db()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        UPDATE nps_responses SET rating = ?, comment = ?, status = 'respondido', updated_at = ?
+        WHERE id = ?
+        """,
+        (rating, comment, datetime.now().isoformat(), nps_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+# ── Indicação / referral (módulo indicação) ──────────────────────────────────
+
+def create_referral(referrer_phone: str, referred_phone: str) -> int:
+    """Registra que referred_phone disse ter sido indicado por referrer_phone.
+    Retorna o id."""
+    conn = _db()
+    cursor = conn.cursor()
+    now = datetime.now().isoformat()
+    cursor.execute(
+        """
+        INSERT INTO referrals (referrer_phone, referred_phone, status, created_at, updated_at)
+        VALUES (?, ?, 'pendente', ?, ?)
+        """,
+        (referrer_phone, referred_phone, now, now)
+    )
+    referral_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return referral_id
+
+
+def get_referral_by_referred_phone(referred_phone: str):
+    """Retorna a indicação PENDENTE mais recente em que esse telefone é o
+    indicado, ou None — usado tanto pra evitar registrar a mesma indicação
+    duas vezes quanto pra checar conversão quando o pedido dele é pago."""
+    conn = _db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, referrer_phone, referred_phone, status FROM referrals "
+        "WHERE referred_phone = ? AND status = 'pendente' ORDER BY created_at DESC LIMIT 1",
+        (referred_phone,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return dict(row)
+
+
+def mark_referral_converted(referral_id: int):
+    """Marca a indicação como convertida (o indicado comprou)."""
+    conn = _db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE referrals SET status = 'convertido', updated_at = ? WHERE id = ?",
+        (datetime.now().isoformat(), referral_id)
+    )
+    conn.commit()
+    conn.close()

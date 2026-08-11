@@ -27,6 +27,45 @@ AI_API_KEY = client_config.require("ai_api_key")
 CHECKOUT_LINK = client_config.get("checkout_link", "")
 SYSTEM_PROMPT = client_config.require("system_prompt")  # Prompt BANT gerado automaticamente
 
+# ── Módulo FAQ / base de conhecimento (added 2026-08-11) ────────────────────
+# Diferente de pós-venda/agendamento, FAQ não precisa de detector de intenção
+# nem de lógica de código — a própria IA já é boa o suficiente pra reconhecer
+# quando uma pergunta bate com uma entrada da lista e responder com as
+# próprias palavras. Por isso o mecanismo é só: se o cliente tiver um
+# faq.json na pasta dele, ele entra direto no SYSTEM_PROMPT em tempo de
+# execução (não precisa regenerar o prompt inteiro pra atualizar uma
+# resposta — só editar o arquivo e reiniciar o serviço). Formato esperado do
+# arquivo: lista de {"pergunta": "...", "resposta": "..."}.
+FAQ_PATH = client_config.CLIENT_DIR / "faq.json"
+
+
+def _load_faq() -> list:
+    try:
+        return json.loads(FAQ_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+
+def _format_faq_block(faq_items: list) -> str:
+    if not faq_items:
+        return ""
+    linhas = [
+        "",
+        "── Perguntas frequentes (use estas respostas quando o assunto bater; "
+        "nunca invente política, prazo ou garantia que não esteja aqui) ──",
+    ]
+    for item in faq_items:
+        pergunta = (item or {}).get("pergunta", "").strip()
+        resposta = (item or {}).get("resposta", "").strip()
+        if pergunta and resposta:
+            linhas.append(f"P: {pergunta}\nR: {resposta}")
+    return "\n".join(linhas) if len(linhas) > 2 else ""
+
+
+_faq_block = _format_faq_block(_load_faq())
+if _faq_block:
+    SYSTEM_PROMPT = SYSTEM_PROMPT + "\n\n" + _faq_block
+
 # Constantes
 SESSION_TTL = 1800  # 30 minutos
 
