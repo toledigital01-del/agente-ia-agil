@@ -261,6 +261,56 @@ def handle_owner_command(phone: str, text: str) -> bool:
         send_whatsapp(OWNER_PHONE, f"✅ IA pausada para {target}.")
         return True
 
+    # Pós-venda / agendamento — mesmos comandos de watcher_template.py
+    # (mantidos em sincronia mesmo esse transporte não estando em produção
+    # ainda, ver seção 22 do SKILL.md pro mesmo princípio já aplicado a mídia).
+    if text_lower.startswith("pedido "):
+        m = re.match(r"^pedido\s+(\d+)\s+(.+)$", text.strip(), re.IGNORECASE)
+        if not m:
+            send_whatsapp(OWNER_PHONE, "⚠️ Formato: pedido 5585999999999 enviado")
+            return True
+        target, novo_status = m.group(1), m.group(2).strip()
+        order_id = sessions.update_order_status_by_lead(f"whatsapp_{target}", novo_status)
+        if order_id is None:
+            send_whatsapp(OWNER_PHONE, f"⚠️ Não encontrei nenhum pedido registrado pra {target}.")
+            return True
+        logger.info(f"📦 Pedido de {target} atualizado pra \"{novo_status}\".")
+        send_whatsapp(OWNER_PHONE, f"✅ Pedido de {target} atualizado pra \"{novo_status}\".")
+        send_whatsapp(target, f"Oi! Passando pra te avisar: seu pedido está \"{novo_status}\". 📦")
+        return True
+
+    if text_lower.startswith("confirmar agendamento "):
+        target = re.sub(r"\D", "", text_lower.replace("confirmar agendamento ", "", 1))
+        if not target:
+            send_whatsapp(OWNER_PHONE, "⚠️ Formato: confirmar agendamento 5585999999999")
+            return True
+        appt = sessions.get_pending_appointment_by_lead(f"whatsapp_{target}")
+        appointment_id = sessions.update_appointment_status_by_lead(f"whatsapp_{target}", "confirmado")
+        if appointment_id is None:
+            send_whatsapp(OWNER_PHONE, f"⚠️ Não encontrei agendamento pendente pra {target}.")
+            return True
+        detalhe = f" ({appt['data_hora_texto']})" if appt else ""
+        send_whatsapp(OWNER_PHONE, f"✅ Agendamento de {target} confirmado{detalhe}.")
+        send_whatsapp(target, f"Oi! Seu agendamento foi confirmado{detalhe}. Te esperamos! 📅")
+        return True
+
+    if text_lower.startswith("cancelar agendamento "):
+        target = re.sub(r"\D", "", text_lower.replace("cancelar agendamento ", "", 1))
+        if not target:
+            send_whatsapp(OWNER_PHONE, "⚠️ Formato: cancelar agendamento 5585999999999")
+            return True
+        appointment_id = sessions.update_appointment_status_by_lead(f"whatsapp_{target}", "cancelado")
+        if appointment_id is None:
+            send_whatsapp(OWNER_PHONE, f"⚠️ Não encontrei agendamento pendente pra {target}.")
+            return True
+        send_whatsapp(OWNER_PHONE, f"✅ Agendamento de {target} cancelado.")
+        send_whatsapp(
+            target,
+            "Oi! Sobre o horário que você pediu pra agendar: esse horário específico não vai dar certo. "
+            "Pode me passar outra data/horário que a gente vê a disponibilidade? 🙏"
+        )
+        return True
+
     return False
 
 
@@ -491,7 +541,10 @@ def _process_message(phone: str, name: str, text: str, is_audio: bool):
         return
 
     try:
-        response, media_requests, forcar_texto = handle_message(phone, name, text)
+        response, media_requests, forcar_texto, owner_notifications = handle_message(phone, name, text)
+        for aviso in owner_notifications:
+            if OWNER_PHONE:
+                send_whatsapp(OWNER_PHONE, aviso)
         if not response:
             return
         if is_audio and not forcar_texto:

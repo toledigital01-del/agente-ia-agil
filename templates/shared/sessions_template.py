@@ -75,6 +75,43 @@ def init_db():
         )
     """)
 
+    # Tabela de pedidos (módulo pós-venda) — um lead pode ter mais de um
+    # pedido ao longo do tempo (compras diferentes), por isso é tabela
+    # própria em vez de metadata. status é texto livre (não enum), pra não
+    # travar em uma lista fixa que pode não bater com o vocabulário de todo
+    # negócio ("em preparo" pra um, "em produção" pra outro).
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            lead_id TEXT NOT NULL,
+            phone TEXT NOT NULL,
+            description TEXT,
+            status TEXT NOT NULL DEFAULT 'pago',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(lead_id) REFERENCES leads(id)
+        )
+    """)
+
+    # Tabela de agendamentos (módulo agendamento) — igual pedidos, um lead
+    # pode agendar mais de uma vez. data_hora fica como texto livre (o mesmo
+    # raciocínio de endereco em agent_template.py: texto de data/hora em
+    # chat natural é irregular demais pra estruturar sem um parser de datas
+    # dedicado) — quem confirma o horário real é o dono, manualmente.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS appointments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            lead_id TEXT NOT NULL,
+            phone TEXT NOT NULL,
+            tipo TEXT,
+            data_hora_texto TEXT,
+            status TEXT NOT NULL DEFAULT 'pendente',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(lead_id) REFERENCES leads(id)
+        )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -312,3 +349,180 @@ def get_metadata(session_id: str, key: str, default=None):
     row = cursor.fetchone()
     conn.close()
     return row["value"] if row else default
+
+
+# ── Pedidos (módulo pós-venda) ───────────────────────────────────────────────
+
+def create_order(lead_id: str, phone: str, description: str = "", status: str = "pago") -> int:
+    """Cria um pedido novo pro lead (ex: ao confirmar pagamento). Retorna o id."""
+    conn = _db()
+    cursor = conn.cursor()
+    now = datetime.now().isoformat()
+    cursor.execute(
+        """
+        INSERT INTO orders (lead_id, phone, description, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (lead_id, phone, description, status, now, now)
+    )
+    order_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return order_id
+
+
+def update_order_status(order_id: int, status: str):
+    """Atualiza o status de um pedido específico pelo id."""
+    conn = _db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE orders SET status = ?, updated_at = ? WHERE id = ?",
+        (status, datetime.now().isoformat(), order_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_order_status_by_lead(lead_id: str, status: str):
+    """Atualiza o status do pedido MAIS RECENTE de um lead — usado pelo
+    comando do dono via WhatsApp ("pedido NUMERO status"), que não sabe o id
+    interno do pedido, só o telefone do cliente."""
+    conn = _db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id FROM orders WHERE lead_id = ? ORDER BY created_at DESC LIMIT 1",
+        (lead_id,)
+    )
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return None
+    order_id = row["id"]
+    cursor.execute(
+        "UPDATE orders SET status = ?, updated_at = ? WHERE id = ?",
+        (status, datetime.now().isoformat(), order_id)
+    )
+    conn.commit()
+    conn.close()
+    return order_id
+
+
+def get_latest_order(lead_id: str):
+    """Retorna o pedido mais recente do lead, ou None se ele nunca comprou."""
+    conn = _db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, description, status, created_at, updated_at FROM orders "
+        "WHERE lead_id = ? ORDER BY created_at DESC LIMIT 1",
+        (lead_id,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return dict(row)
+
+
+def get_orders_by_lead(lead_id: str) -> list:
+    """Retorna todos os pedidos do lead, do mais recente pro mais antigo."""
+    conn = _db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, description, status, created_at, updated_at FROM orders "
+        "WHERE lead_id = ? ORDER BY created_at DESC",
+        (lead_id,)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ── Agendamentos (módulo agendamento) ────────────────────────────────────────
+
+def create_appointment(lead_id: str, phone: str, tipo: str, data_hora_texto: str, status: str = "pendente") -> int:
+    """Cria um pedido de agendamento (ainda não confirmado por um humano). Retorna o id."""
+    conn = _db()
+    cursor = conn.cursor()
+    now = datetime.now().isoformat()
+    cursor.execute(
+        """
+        INSERT INTO appointments (lead_id, phone, tipo, data_hora_texto, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (lead_id, phone, tipo, data_hora_texto, status, now, now)
+    )
+    appointment_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return appointment_id
+
+
+def update_appointment_status(appointment_id: int, status: str):
+    """Atualiza o status de um agendamento específico pelo id."""
+    conn = _db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE appointments SET status = ?, updated_at = ? WHERE id = ?",
+        (status, datetime.now().isoformat(), appointment_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_latest_appointment(lead_id: str):
+    """Retorna o agendamento mais recente do lead, ou None."""
+    conn = _db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, tipo, data_hora_texto, status, created_at, updated_at FROM appointments "
+        "WHERE lead_id = ? ORDER BY created_at DESC LIMIT 1",
+        (lead_id,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return dict(row)
+
+
+def get_pending_appointment_by_lead(lead_id: str):
+    """Retorna o agendamento PENDENTE mais recente do lead (aguardando
+    confirmação do dono), ou None se não houver nenhum em aberto — evita
+    criar um segundo pedido de agendamento duplicado enquanto o primeiro
+    ainda não foi confirmado/recusado."""
+    conn = _db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, tipo, data_hora_texto, status, created_at, updated_at FROM appointments "
+        "WHERE lead_id = ? AND status = 'pendente' ORDER BY created_at DESC LIMIT 1",
+        (lead_id,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return dict(row)
+
+
+def update_appointment_status_by_lead(lead_id: str, status: str):
+    """Atualiza o status do agendamento PENDENTE mais recente de um lead —
+    usado pelo comando do dono via WhatsApp ("confirmar agendamento NUMERO")."""
+    conn = _db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id FROM appointments WHERE lead_id = ? AND status = 'pendente' "
+        "ORDER BY created_at DESC LIMIT 1",
+        (lead_id,)
+    )
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return None
+    appointment_id = row["id"]
+    cursor.execute(
+        "UPDATE appointments SET status = ?, updated_at = ? WHERE id = ?",
+        (status, datetime.now().isoformat(), appointment_id)
+    )
+    conn.commit()
+    conn.close()
+    return appointment_id

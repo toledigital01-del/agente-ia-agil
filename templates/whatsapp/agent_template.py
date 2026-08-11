@@ -24,9 +24,9 @@ from datetime import datetime
 
 # Carregar templates compartilhados
 sys.path.insert(0, str(Path(__file__).parent.parent / "shared"))
-from agent_core_template import call_ai, is_purchase_intent, is_handoff_request, is_frustration_keyword, is_repeated_question, format_checkout_message, SYSTEM_PROMPT, SESSION_TTL
+from agent_core_template import call_ai, is_purchase_intent, is_handoff_request, is_frustration_keyword, is_repeated_question, is_order_status_request, is_scheduling_request, format_checkout_message, SYSTEM_PROMPT, SESSION_TTL
 import client_config
-from sessions_template import init_db, load_session, save_session, create_lead, add_message, mark_checkout_sent, save_metadata, get_metadata, get_lead_history
+from sessions_template import init_db, load_session, save_session, create_lead, add_message, mark_checkout_sent, save_metadata, get_metadata, get_lead_history, get_latest_order, create_appointment, get_pending_appointment_by_lead
 
 # Inicializar o banco de dados automaticamente ao importar o módulo
 init_db()
@@ -428,6 +428,43 @@ def is_trigger(text: str) -> bool:
     return True
 
 
+# ── Agendamento: extração leve de data/hora (added 2026-08-11) ──────────────
+# Mesmo raciocínio de extract_address(): data/hora em chat natural
+# ("quinta de manhã", "dia 20 às 14h", "amanhã à tarde") é irregular demais
+# pra estruturar com segurança sem um parser de datas dedicado. Em vez de
+# tentar interpretar a data certinho, só detecta SE a mensagem parece ter uma
+# referência de data/hora, e guarda o texto bruto — quem confirma o horário
+# real é o dono, manualmente, lendo essa mesma frase.
+_DIAS_SEMANA = ["segunda", "terça", "terca", "quarta", "quinta", "sexta", "sábado", "sabado", "domingo"]
+_PERIODOS_DIA = ["manhã", "manha", "tarde", "noite"]
+_REFERENCIAS_DIA = ["amanhã", "amanha", "hoje", "depois de amanhã", "depois de amanha"]
+
+
+def _has_datetime_hint(text: str) -> bool:
+    """True se o texto parece conter alguma referência de dia/horário."""
+    text_lower = text.lower()
+    if any(d in text_lower for d in _DIAS_SEMANA + _REFERENCIAS_DIA):
+        return True
+    if any(p in text_lower for p in _PERIODOS_DIA):
+        return True
+    if re.search(r"\b\d{1,2}[:h]\d{0,2}\b", text_lower):  # "14h", "14:30", "9h"
+        return True
+    if re.search(r"\b\d{1,2}/\d{1,2}(/\d{2,4})?\b", text_lower):  # "20/08"
+        return True
+    return False
+
+
+def _infer_appointment_tipo(text: str) -> str:
+    text_lower = text.lower()
+    if "instal" in text_lower:
+        return "instalação"
+    if "visita" in text_lower:
+        return "visita técnica"
+    if "demonstra" in text_lower:
+        return "demonstração"
+    return "atendimento"
+
+
 def handle_message(phone: str, sender_name: str, text: str) -> tuple:
     """
     Processa mensagem e retorna resposta do agente com cálculos físicos e cotação de frete.
@@ -438,16 +475,19 @@ def handle_message(phone: str, sender_name: str, text: str) -> tuple:
         text: Conteúdo da mensagem
 
     Returns:
-        Tupla (resposta_texto, media_requests, forcar_texto) — resposta_texto
-        é None se não é trigger. media_requests é uma lista de
-        {"path": Path, "mediatype": "image"|"video"} pra watcher.py enviar
-        depois do texto. forcar_texto=True quando a resposta tem que ir por
-        escrito mesmo se o cliente pediu áudio (ex: resumo final de config).
+        Tupla (resposta_texto, media_requests, forcar_texto,
+        owner_notifications) — resposta_texto é None se não é trigger.
+        media_requests é uma lista de {"path": Path, "mediatype":
+        "image"|"video"} pra watcher.py enviar depois do texto.
+        forcar_texto=True quando a resposta tem que ir por escrito mesmo se
+        o cliente pediu áudio (ex: resumo final de config).
+        owner_notifications é uma lista de strings pra watcher.py mandar pro
+        OWNER_PHONE (ex: pedido de agendamento aguardando confirmação).
     """
 
     # 1. Verificar trigger
     if not is_trigger(text):
-        return None, [], False
+        return None, [], False, []
 
     # 2. Criar/carregar lead
     lead_id = create_lead(phone, name=sender_name)
@@ -519,6 +559,12 @@ def handle_message(phone: str, sender_name: str, text: str) -> tuple:
     saved_endereco = get_metadata(lead_id, "endereco")
 
     prompt_injection = []
+    # Avisos pra notificar o dono via WhatsApp (ex: pedido de agendamento
+    # pendente de confirmação) — watcher.py/webhook_server.py mandam cada
+    # item pro OWNER_PHONE depois de processar a resposta ao cliente. Lista
+    # em vez de um campo único porque, no futuro, mais de um módulo pode
+    # gerar notificação na mesma mensagem.
+    owner_notifications = []
 
     if resuming_after_gap:
         if gap_seconds >= 86400:
@@ -574,6 +620,49 @@ def handle_message(phone: str, sender_name: str, text: str) -> tuple:
             "Se ainda não confirmou esse endereço de volta com ele, confirme antes de gerar o link de pagamento. "
             "Se já confirmou, pode seguir normalmente.]"
         )
+
+    # ── Pós-venda: cliente perguntando sobre pedido já feito ────────────────
+    if is_order_status_request(text):
+        latest_order = get_latest_order(lead_id)
+        if latest_order:
+            prompt_injection.append(
+                f"[SISTEMA: O cliente está perguntando sobre o andamento do pedido dele. "
+                f"Status atual (registrado no sistema): \"{latest_order['status']}\". "
+                f"Descrição do pedido: \"{latest_order['description']}\". "
+                "Responda usando ESSE status real, com suas próprias palavras — nunca invente um status "
+                "diferente, nem uma data de entrega que não foi informada aqui.]"
+            )
+        else:
+            prompt_injection.append(
+                "[SISTEMA: O cliente está perguntando sobre um pedido, mas não encontramos nenhum pedido "
+                "registrado pra ele no sistema. Peça com cuidado mais detalhes (quando comprou, se foi por "
+                "aqui mesmo) e, se ele insistir que já comprou, avise que vai chamar um atendente pra conferir.]"
+            )
+
+    # ── Agendamento: cliente tentando marcar um horário ──────────────────────
+    if is_scheduling_request(text) and _has_datetime_hint(text):
+        if get_pending_appointment_by_lead(lead_id):
+            # Já tem um pedido de agendamento aberto aguardando o dono — não
+            # cria outro duplicado, só deixa a IA responder normalmente
+            # (ela já foi instruída a dizer que o horário está em confirmação).
+            prompt_injection.append(
+                "[SISTEMA: O cliente já tem um pedido de agendamento em aberto, aguardando confirmação do "
+                "responsável. Não crie um novo — só reforce que já está sendo confirmado.]"
+            )
+        else:
+            tipo = _infer_appointment_tipo(text)
+            create_appointment(lead_id, phone, tipo, text.strip())
+            owner_notifications.append(
+                f"📅 {sender_name} ({phone}) pediu pra agendar ({tipo}): \"{text.strip()}\"\n\n"
+                f"Pra confirmar, responda por aqui: confirmar agendamento {phone}\n"
+                f"Pra recusar: cancelar agendamento {phone}"
+            )
+            prompt_injection.append(
+                f"[SISTEMA: O cliente pediu pra agendar (\"{text.strip()}\"). Você já registrou esse pedido "
+                "internamente e o responsável foi avisado. Confirme pra ele que anotou esse horário e que vai "
+                "confirmar com o responsável antes de virar definitivo — deixe claro que ainda não é uma "
+                "confirmação, é um pedido em análise.]"
+            )
 
     # Injetar instruções calculadas dinamicamente no final do histórico enviado à IA
     ai_messages = messages.copy()
@@ -696,7 +785,7 @@ def handle_message(phone: str, sender_name: str, text: str) -> tuple:
     # 8. Salvar sessão
     save_session(lead_id, messages)
 
-    return response, media_requests, forcar_texto
+    return response, media_requests, forcar_texto, owner_notifications
 
 
 def test_trigger():
@@ -740,7 +829,7 @@ def main():
             if msg.lower() == "sair":
                 break
 
-            response, media_requests, forcar_texto = handle_message(
+            response, media_requests, forcar_texto, owner_notifications = handle_message(
                 phone=args.chat,
                 sender_name="Teste",
                 text=msg
@@ -752,6 +841,8 @@ def main():
                     print("  [forcaria envio por texto, mesmo se o cliente tivesse mandado audio]")
                 for item in media_requests:
                     print(f"  [enviaria {item['mediatype']}: {item['path']}]")
+                for aviso in owner_notifications:
+                    print(f"  [avisaria o dono: {aviso}]")
             else:
                 print("(Mensagem ignorada — não contém trigger)\n")
     else:

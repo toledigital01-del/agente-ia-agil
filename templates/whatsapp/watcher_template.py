@@ -1105,8 +1105,15 @@ def handle_owner_command(phone: str, text: str) -> bool:
     Retorna True se era um comando (mensagem não deve ir para a IA normal).
 
     Comandos disponíveis:
-      reativar NUMERO  — reativa a IA para o lead com esse número
-      pausar NUMERO    — pausa a IA para o lead com esse número
+      reativar NUMERO              — reativa a IA para o lead com esse número
+      pausar NUMERO                — pausa a IA para o lead com esse número
+      pedido NUMERO STATUS         — atualiza o status do pedido mais recente
+                                      desse lead e avisa o cliente (ex:
+                                      "pedido 5585999999999 enviado")
+      confirmar agendamento NUMERO — confirma o agendamento pendente desse
+                                      lead e avisa o cliente
+      cancelar agendamento NUMERO  — recusa o agendamento pendente desse
+                                      lead e avisa o cliente
     """
     if not OWNER_PHONE or phone != OWNER_PHONE.replace("@s.whatsapp.net", ""):
         return False
@@ -1135,6 +1142,64 @@ def handle_owner_command(phone: str, text: str) -> bool:
         sessions.save_metadata(lead_id, "human_handoff_at", str(int(time.time())))
         logger.info(f"🙋 IA pausada para {target} por comando do dono.")
         send_whatsapp(OWNER_PHONE, f"✅ IA pausada para {target}. Você pode atender manualmente.")
+        return True
+
+    # Pós-venda: dono atualiza o status do pedido mais recente do lead, e o
+    # cliente é avisado automaticamente — sem precisar o dono escrever a
+    # mensagem de aviso na mão toda vez.
+    if text_lower.startswith("pedido "):
+        m = re.match(r"^pedido\s+(\d+)\s+(.+)$", text.strip(), re.IGNORECASE)
+        if not m:
+            send_whatsapp(OWNER_PHONE, "⚠️ Formato: pedido 5585999999999 enviado")
+            return True
+        target, novo_status = m.group(1), m.group(2).strip()
+        lead_id = f"whatsapp_{target}"
+        order_id = sessions.update_order_status_by_lead(lead_id, novo_status)
+        if order_id is None:
+            send_whatsapp(OWNER_PHONE, f"⚠️ Não encontrei nenhum pedido registrado pra {target}.")
+            return True
+        logger.info(f"📦 Pedido de {target} atualizado pra \"{novo_status}\" por comando do dono.")
+        send_whatsapp(OWNER_PHONE, f"✅ Pedido de {target} atualizado pra \"{novo_status}\".")
+        send_whatsapp(target, f"Oi! Passando pra te avisar: seu pedido está \"{novo_status}\". 📦")
+        return True
+
+    # Agendamento: dono confirma ou recusa o pedido de agendamento pendente
+    # (criado por handle_message() quando o lead pede um horário) — o
+    # cliente é avisado automaticamente nos dois casos.
+    if text_lower.startswith("confirmar agendamento "):
+        target = re.sub(r"\D", "", text_lower.replace("confirmar agendamento ", "", 1))
+        if not target:
+            send_whatsapp(OWNER_PHONE, "⚠️ Formato: confirmar agendamento 5585999999999")
+            return True
+        lead_id = f"whatsapp_{target}"
+        appt = sessions.get_pending_appointment_by_lead(lead_id)
+        appointment_id = sessions.update_appointment_status_by_lead(lead_id, "confirmado")
+        if appointment_id is None:
+            send_whatsapp(OWNER_PHONE, f"⚠️ Não encontrei agendamento pendente pra {target}.")
+            return True
+        detalhe = f" ({appt['data_hora_texto']})" if appt else ""
+        logger.info(f"📅 Agendamento de {target} confirmado por comando do dono.")
+        send_whatsapp(OWNER_PHONE, f"✅ Agendamento de {target} confirmado{detalhe}.")
+        send_whatsapp(target, f"Oi! Seu agendamento foi confirmado{detalhe}. Te esperamos! 📅")
+        return True
+
+    if text_lower.startswith("cancelar agendamento "):
+        target = re.sub(r"\D", "", text_lower.replace("cancelar agendamento ", "", 1))
+        if not target:
+            send_whatsapp(OWNER_PHONE, "⚠️ Formato: cancelar agendamento 5585999999999")
+            return True
+        lead_id = f"whatsapp_{target}"
+        appointment_id = sessions.update_appointment_status_by_lead(lead_id, "cancelado")
+        if appointment_id is None:
+            send_whatsapp(OWNER_PHONE, f"⚠️ Não encontrei agendamento pendente pra {target}.")
+            return True
+        logger.info(f"📅 Agendamento de {target} cancelado por comando do dono.")
+        send_whatsapp(OWNER_PHONE, f"✅ Agendamento de {target} cancelado.")
+        send_whatsapp(
+            target,
+            "Oi! Sobre o horário que você pediu pra agendar: esse horário específico não vai dar certo. "
+            "Pode me passar outra data/horário que a gente vê a disponibilidade? 🙏"
+        )
         return True
 
     return False
@@ -1175,7 +1240,15 @@ def process_payment_followups():
             payment_status = check_asaas_payment_status(checkout_id)
             if payment_status == "PAID":
                 sessions.save_metadata(lead_id, "followup_status", "PAID")
-                logger.info(f"🎉 Pagamento confirmado para o lead {name} ({phone})!")
+                # Pós-venda: abre o pedido no sistema já como "em preparo" pra
+                # que uma pergunta futura ("cadê meu pedido?") tenha algo real
+                # pra responder — sem isso, o módulo de status de pedido
+                # (agent_core.is_order_status_request) não teria nenhum
+                # registro pra consultar pra ninguém que comprou antes dele
+                # existir.
+                descricao = f"{sessions.get_metadata(lead_id, 'width', '?')}m x {sessions.get_metadata(lead_id, 'height', '?')}m"
+                sessions.create_order(lead_id, phone, description=descricao, status="em preparo")
+                logger.info(f"🎉 Pagamento confirmado para o lead {name} ({phone})! Pedido registrado.")
                 send_whatsapp(phone, f"Oba, {name}! 🎉 Confirmamos o recebimento do seu pagamento. O seu pedido de cortinas/persianas sob medida já foi encaminhado para o nosso setor de fabricação! Em breve te enviaremos o código de rastreamento por aqui. Qualquer dúvida, estou à disposição! 💪")
                 return  # anti-bloqueio: só 1 envio por ciclo (ver docstring)
                 
@@ -1547,7 +1620,10 @@ def watch():
                     continue
 
                 try:
-                    response, media_requests, forcar_texto = handle_message(phone, name, text)
+                    response, media_requests, forcar_texto, owner_notifications = handle_message(phone, name, text)
+                    for aviso in owner_notifications:
+                        if OWNER_PHONE:
+                            send_whatsapp(OWNER_PHONE, aviso)
                     if response:
                         if is_audio and not forcar_texto:
                             logger.info(f"📤 Gerando e enviando resposta em áudio para {phone}...")

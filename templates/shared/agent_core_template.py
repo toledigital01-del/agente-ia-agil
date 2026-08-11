@@ -301,6 +301,51 @@ def is_repeated_question(message: str, previous_user_messages: list) -> bool:
     return False
 
 
+# ── Pós-venda: detecção de dúvida sobre pedido já feito (added 2026-08-11) ──
+
+ORDER_STATUS_KEYWORDS = [
+    "meu pedido", "o meu pedido", "status do pedido", "status do meu pedido",
+    "cadê meu pedido", "cade meu pedido", "cadê o meu pedido", "cade o meu pedido",
+    "onde está meu pedido", "onde esta meu pedido", "quando chega", "quando que chega",
+    "previsão de entrega", "previsao de entrega", "rastreio", "código de rastreio",
+    "codigo de rastreio", "já foi enviado", "ja foi enviado", "foi despachado",
+    "já saiu pra entrega", "ja saiu pra entrega", "acompanhar pedido", "acompanhar o pedido",
+]
+
+
+def is_order_status_request(message: str) -> bool:
+    """Detecta se o lead está perguntando sobre o andamento de uma compra já
+    feita (pós-venda) — diferente de is_purchase_intent, que é sobre iniciar
+    uma compra nova. Usado pra injetar o status real do pedido no contexto
+    da IA em vez de deixar ela inventar ou dizer que não sabe."""
+    if not message:
+        return False
+    message_lower = message.lower()
+    return any(kw in message_lower for kw in ORDER_STATUS_KEYWORDS)
+
+
+# ── Agendamento: detecção de intenção de marcar horário (added 2026-08-11) ──
+
+SCHEDULING_KEYWORDS = [
+    "agendar", "marcar uma visita", "marcar visita", "marcar um horário",
+    "marcar horário", "marcar horario", "quero agendar", "quero marcar",
+    "tem horário disponível", "tem horario disponivel", "que horas vocês atendem",
+    "que horas voces atendem", "disponibilidade", "posso passar aí", "posso passar ai",
+    "marcar uma instalação", "marcar instalação", "marcar instalacao",
+]
+
+
+def is_scheduling_request(message: str) -> bool:
+    """Detecta se o lead está tentando marcar um horário (visita técnica,
+    instalação, demonstração, etc.) — não confirma sozinho, só sinaliza pra
+    handle_message() tentar extrair data/hora e abrir um pedido de
+    agendamento pendente de confirmação humana."""
+    if not message:
+        return False
+    message_lower = message.lower()
+    return any(kw in message_lower for kw in SCHEDULING_KEYWORDS)
+
+
 def format_checkout_message(url: str = CHECKOUT_LINK) -> str:
     """Formata mensagem com link de checkout."""
     return f"""Perfeito! Passei tudo aqui. Deixa eu enviar nosso checkout pra você:
